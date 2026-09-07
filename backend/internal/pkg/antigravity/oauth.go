@@ -34,7 +34,8 @@ const (
 	AntigravityUserAgentVersionEnv = "ANTIGRAVITY_USER_AGENT_VERSION"
 
 	// DefaultUserAgentVersion 是未通过环境变量或后台设置覆盖时使用的默认版本号。
-	DefaultUserAgentVersion = "1.23.2"
+	// Gemini 3.8 Flash is gated behind Antigravity >= 2.11.0; 2.12.2 is current IDE.
+	DefaultUserAgentVersion = "2.12.2"
 
 	// 固定的 redirect_uri（用户需手动复制 code）
 	RedirectURI = "http://localhost:8085/callback"
