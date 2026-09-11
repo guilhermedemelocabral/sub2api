@@ -1045,7 +1045,14 @@ func (s *BillingService) HasIdentifiedTokenPricing(model string) bool {
 		}
 	}
 	pricing, ok := s.fallbackPrices[model]
-	return ok && pricing != nil
+	if ok && pricing != nil {
+		return true
+	}
+	if alias := normalizeGeminiThinkingTierAlias(model); alias != model {
+		pricing, ok = s.fallbackPrices[alias]
+		return ok && pricing != nil
+	}
+	return false
 }
 
 // GetModelPricing 获取模型价格配置

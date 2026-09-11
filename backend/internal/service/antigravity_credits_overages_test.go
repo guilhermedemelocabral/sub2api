@@ -21,6 +21,11 @@ func TestClassifyAntigravity429(t *testing.T) {
 		require.Equal(t, antigravity429QuotaExhausted, classifyAntigravity429(body))
 	})
 
+	t.Run("gemini 3.8 flash individual weekly quota", func(t *testing.T) {
+		body := []byte(`{ "error": { "code": 429, "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 142h52m26s.", "status": "RESOURCE_EXHAUSTED", "details": [ { "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED", "domain": "cloudcode-pa.googleapis.com", "metadata": { "model": "gemini-3.8-flash-high" } } ] } }`)
+		require.Equal(t, antigravity429QuotaExhausted, classifyAntigravity429(body))
+	})
+
 	t.Run("结构化限流", func(t *testing.T) {
 		body := []byte(`{
 			"error": {

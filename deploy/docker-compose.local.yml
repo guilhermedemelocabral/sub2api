@@ -24,7 +24,15 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: local-gemini38
+        COMMIT: local
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.org}
+    image: weishaw/sub2api:local
     container_name: sub2api
     restart: unless-stopped
     security_opt:
@@ -56,6 +64,7 @@ services:
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}
       - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
+      - GATEWAY_ANTIGRAVITY_GEMINI_REPROBE_SECONDS=${GATEWAY_ANTIGRAVITY_GEMINI_REPROBE_SECONDS:-60}
 
       # =======================================================================
       # Database Configuration (PostgreSQL)

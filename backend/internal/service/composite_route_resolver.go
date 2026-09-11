@@ -45,6 +45,7 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 			if upstreamModel == "" {
 				upstreamModel = model
 			}
+			upstreamModel = rewriteGemini38FlashToHigh(model, upstreamModel)
 			return CompositeRouteDecision{
 				Matched:        true,
 				Source:         CompositeRouteSourceExplicit,
@@ -173,4 +174,21 @@ func matchCompositeRoute(routes []CompositeModelRoute, model, endpoint string) (
 		return a.route.ID < b.route.ID
 	})
 	return candidates[0].route, true
+}
+
+// rewriteGemini38FlashToHigh sends public Gemini 3.8 Flash aliases to
+// gemini-3.8-flash-high. The bare ID 404s upstream. Explicit -low/-medium/-high
+// requests keep their suffix. Same quota either way.
+func rewriteGemini38FlashToHigh(publicModel, upstreamModel string) string {
+	public := strings.ToLower(strings.TrimSpace(publicModel))
+	if public == "" {
+		return upstreamModel
+	}
+	if strings.Contains(public, "3.8-flash-low") || strings.Contains(public, "3.8-flash-medium") {
+		return upstreamModel
+	}
+	if strings.Contains(public, "gemini-3.8-flash") || strings.Contains(public, "gem38") {
+		return "gemini-3.8-flash-high"
+	}
+	return upstreamModel
 }

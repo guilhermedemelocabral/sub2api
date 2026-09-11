@@ -555,6 +555,21 @@ func TestBillingService_Gemini38FlashThinkingTierFallbacksAreBillable(t *testing
 	}
 }
 
+func TestBillingService_HasIdentifiedTokenPricing_Gemini38FlashThinkingTiers(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	for _, model := range []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			require.True(t, svc.HasIdentifiedTokenPricing(model))
+		})
+	}
+}
+
 func TestDefaultPricingIncludesGemini36FlashRates(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
 	require.NoError(t, err)
@@ -572,6 +587,27 @@ func TestDefaultPricingIncludesGemini36FlashRates(t *testing.T) {
 			require.InDelta(t, 1.5e-6, pricing.InputPricePerToken, 1e-12)
 			require.InDelta(t, 7.5e-6, pricing.OutputPricePerToken, 1e-12)
 			require.InDelta(t, 0.15e-6, pricing.CacheReadPricePerToken, 1e-12)
+		})
+	}
+}
+
+func TestDefaultPricingIncludesGemini38FlashRates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	pricingSvc := &PricingService{}
+	pricingData, err := pricingSvc.parsePricingData(data)
+	require.NoError(t, err)
+	pricingSvc.pricingData = pricingData
+	billingSvc := NewBillingService(&config.Config{}, pricingSvc)
+
+	for _, model := range []string{"gemini-3.8-flash", "gemini-3.8-flash-low", "gemini-3.8-flash-high"} {
+		t.Run(model, func(t *testing.T) {
+			pricing, err := billingSvc.GetModelPricing(model)
+			require.NoError(t, err)
+			require.InDelta(t, 0.75e-6, pricing.InputPricePerToken, 1e-12)
+			require.InDelta(t, 3.75e-6, pricing.OutputPricePerToken, 1e-12)
+			require.InDelta(t, 0.075e-6, pricing.CacheReadPricePerToken, 1e-12)
 		})
 	}
 }

@@ -42,6 +42,39 @@ func (s compositeRouteRepoStub) DeleteByGroup(ctx context.Context, groupID int64
 	return nil
 }
 
+func TestRewriteGemini38FlashToHigh(t *testing.T) {
+	require.Equal(t, "gemini-3.8-flash-high", rewriteGemini38FlashToHigh("gemini-3.8-flash", "gemini-3.8-flash-tiered"))
+	require.Equal(t, "gemini-3.8-flash-high", rewriteGemini38FlashToHigh("sub2api/gemini-3.8-flash", "gemini-3.8-flash"))
+	require.Equal(t, "gemini-3.8-flash-high", rewriteGemini38FlashToHigh("sub2/gem38", "gemini-3.8-flash-tiered"))
+	require.Equal(t, "gemini-3.8-flash-high", rewriteGemini38FlashToHigh("gemini-3.8-flash-high", "gemini-3.8-flash-high"))
+	require.Equal(t, "gemini-3.8-flash-low", rewriteGemini38FlashToHigh("gemini-3.8-flash-low", "gemini-3.8-flash-low"))
+	require.Equal(t, "gemini-3.7-flash-tiered", rewriteGemini38FlashToHigh("gemini-3.7-flash", "gemini-3.7-flash-tiered"))
+}
+
+func TestCompositeRouteResolverMapsPublicFlashToHigh(t *testing.T) {
+	resolver := NewCompositeRouteResolver(compositeRouteRepoStub{
+		routes: []CompositeModelRoute{
+			{
+				ID:             24,
+				GroupID:        2,
+				PublicModel:    "gemini-3.8-flash",
+				MatchType:      CompositeRouteMatchExact,
+				TargetPlatform: PlatformAntigravity,
+				UpstreamModel:  "gemini-3.8-flash-tiered",
+				Endpoint:       CompositeRouteEndpointAny,
+				Priority:       5,
+				Enabled:        true,
+			},
+		},
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 2, "gemini-3.8-flash", CompositeRouteEndpointChatCompletions)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, "gemini-3.8-flash-high", decision.UpstreamModel)
+}
+
 func TestCompositeRouteResolverExplicitExactRouteRewritesModel(t *testing.T) {
 	resolver := NewCompositeRouteResolver(compositeRouteRepoStub{
 		routes: []CompositeModelRoute{

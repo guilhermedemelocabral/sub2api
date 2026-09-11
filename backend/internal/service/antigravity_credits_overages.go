@@ -31,6 +31,7 @@ var (
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
+		"individual quota reached",
 	}
 
 	creditsExhaustedKeywords = []string{

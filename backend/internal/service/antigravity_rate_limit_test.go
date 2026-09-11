@@ -877,6 +877,31 @@ func TestSetAntigravityModelRateLimits_DoesNotDoubleMapCustomChain(t *testing.T)
 	require.Equal(t, "claude-sonnet-4-5", repo.modelRateLimitCalls[0].modelKey)
 }
 
+func TestSetAntigravityModelRateLimits_QuotaExhaustedHonorsWeeklyReset(t *testing.T) {
+	repo := &stubAntigravityAccountRepo{}
+	svc := &AntigravityGatewayService{}
+	account := &Account{ID: 7, Platform: PlatformAntigravity}
+	week := time.Now().Add(142 * time.Hour)
+	body := []byte(`{"error":{"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-3.8-flash-high"}}]}}`)
+
+	success := svc.setAntigravityModelRateLimits(
+		context.Background(),
+		repo,
+		account,
+		"gemini-3.8-flash-high",
+		"[test]",
+		429,
+		week,
+		false,
+		body,
+	)
+
+	require.True(t, success)
+	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Equal(t, "gemini-3.8-flash-high", repo.modelRateLimitCalls[0].modelKey)
+	require.WithinDuration(t, time.Now().Add(defaultAntigravityGeminiReprobeCooldown), repo.modelRateLimitCalls[0].resetAt, 2*time.Second)
+}
+
 func TestSetModelRateLimitAndClearSession_UsesUpstreamReportedModelMetadata(t *testing.T) {
 	repo := &stubAntigravityAccountRepo{}
 	svc := &AntigravityGatewayService{accountRepo: repo}

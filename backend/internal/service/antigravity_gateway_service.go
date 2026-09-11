@@ -246,7 +246,7 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 		rateLimitDuration = antigravityDefaultRateLimitDuration
 	}
 	resetAt := time.Now().Add(rateLimitDuration)
-	if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, statusCode, resetAt, false) {
+	if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, statusCode, resetAt, false, respBody) {
 		return false
 	}
 	s.clearStickySession(p.ctx, p.groupID, p.sessionHash)

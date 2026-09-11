@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -15,12 +18,84 @@ const (
 	// anthropicFableRateLimitKey 是 Anthropic 7d_oi（Fable 专属 7d 窗口）限流的
 	// 家族级 scope：命中后所有 Fable 变体（含 [1m] 等后缀）都不再调度到该账号。
 	anthropicFableRateLimitKey = "claude-fable-5"
+
+	antigravityQuotaExhaustedReason = "quota_exhausted"
+
+	// defaultAntigravityGeminiReprobeCooldown is how long a Gemini 429 keeps an
+	// Antigravity account skipped before the scheduler probes it again.
+	// Google often returns a weekly quotaResetTimeStamp that does not match
+	// remaining quota; honoring it blindly parks the whole pool.
+	defaultAntigravityGeminiReprobeCooldown = 60 * time.Second
+
+	antigravityGeminiReprobeSecondsEnv = "GATEWAY_ANTIGRAVITY_GEMINI_REPROBE_SECONDS"
 )
+
+// antigravityGeminiReprobeCooldownNs stores an explicit override in nanoseconds.
+// 0 = use defaultAntigravityGeminiReprobeCooldown; negative = disable re-probe.
+var antigravityGeminiReprobeCooldownNs atomic.Int64
+
+// ApplyAntigravityGeminiReprobeSeconds updates the process-wide Gemini re-probe
+// cooldown. seconds <= 0 disables re-probe (honor upstream reset_at fully).
+func ApplyAntigravityGeminiReprobeSeconds(seconds int) {
+	if seconds <= 0 {
+		antigravityGeminiReprobeCooldownNs.Store(-1)
+		return
+	}
+	antigravityGeminiReprobeCooldownNs.Store(int64(time.Duration(seconds) * time.Second))
+}
+
+func antigravityGeminiReprobeCooldown() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(antigravityGeminiReprobeSecondsEnv)); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err == nil {
+			if seconds <= 0 {
+				return 0
+			}
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	v := antigravityGeminiReprobeCooldownNs.Load()
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return defaultAntigravityGeminiReprobeCooldown
+	}
+	return time.Duration(v)
+}
+
+func isAntigravityGeminiRateLimitKey(key string) bool {
+	return key == antigravityGeminiModelRateLimitKey || isAntigravityGeminiModel(key)
+}
+
+// capAntigravityGeminiRateLimitReset truncates a far-future Gemini 429 reset so
+// the pool re-probes instead of waiting out a weekly timestamp.
+func capAntigravityGeminiRateLimitReset(modelKey string, resetAt time.Time) time.Time {
+	return capAntigravityGeminiRateLimitResetWithCategory(modelKey, resetAt, antigravity429Unknown)
+}
+
+// capAntigravityGeminiRateLimitResetWithCategory truncates far-future Gemini 429
+// resets so the pool re-probes. Google's weekly quotaResetTimeStamp often does
+// not match remaining Flash quota (for example after a misrouted -high request).
+func capAntigravityGeminiRateLimitResetWithCategory(modelKey string, resetAt time.Time, category antigravity429Category) time.Time {
+	_ = category
+	if !isAntigravityGeminiRateLimitKey(modelKey) {
+		return resetAt
+	}
+	cooldown := antigravityGeminiReprobeCooldown()
+	if cooldown <= 0 {
+		return resetAt
+	}
+	capAt := time.Now().Add(cooldown)
+	if resetAt.After(capAt) {
+		return capAt
+	}
+	return resetAt
+}
 
 // isRateLimitActiveForKey 检查指定 key 的限流是否生效
 func (a *Account) isRateLimitActiveForKey(key string) bool {
-	resetAt := a.modelRateLimitResetAt(key)
-	return resetAt != nil && time.Now().Before(*resetAt)
+	return a.getRateLimitRemainingForKey(key) > 0
 }
 
 // getRateLimitRemainingForKey 获取指定 key 的限流剩余时间，0 表示未限流或已过期
@@ -30,10 +105,34 @@ func (a *Account) getRateLimitRemainingForKey(key string) time.Duration {
 		return 0
 	}
 	remaining := time.Until(*resetAt)
-	if remaining > 0 {
-		return remaining
+	if remaining <= 0 {
+		return 0
 	}
-	return 0
+	if a.antigravityGeminiLockAllowsReprobe(key) {
+		return 0
+	}
+	return remaining
+}
+
+// antigravityGeminiLockAllowsReprobe reports whether a stored Gemini 429 should
+// be ignored so this account can be tried again. Requires rate_limited_at so
+// records that only have reset_at keep the historical "honor reset" behavior.
+func (a *Account) antigravityGeminiLockAllowsReprobe(key string) bool {
+	if a == nil || a.Platform != PlatformAntigravity {
+		return false
+	}
+	if !isAntigravityGeminiRateLimitKey(key) {
+		return false
+	}
+	cooldown := antigravityGeminiReprobeCooldown()
+	if cooldown <= 0 {
+		return false
+	}
+	limitedAt := a.modelRateLimitedAt(key)
+	if limitedAt == nil {
+		return false
+	}
+	return time.Since(*limitedAt) >= cooldown
 }
 
 func (a *Account) isModelRateLimitedWithContext(ctx context.Context, requestedModel string) bool {
@@ -154,11 +253,19 @@ func isAntigravityGeminiModel(model string) bool {
 }
 
 func antigravityModelRateLimitKeys(model string) []string {
+	return antigravityModelRateLimitKeysForCategory(model, antigravity429Unknown)
+}
+
+func antigravityModelRateLimitKeysForCategory(model string, category antigravity429Category) []string {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return nil
 	}
 	keys := []string{model}
+	// A Gemini 429 on one model ID must not park every Gemini model on the account.
+	if category == antigravity429QuotaExhausted {
+		return keys
+	}
 	if isAntigravityGeminiModel(model) && model != antigravityGeminiModelRateLimitKey {
 		keys = append(keys, antigravityGeminiModelRateLimitKey)
 	}
@@ -166,7 +273,34 @@ func antigravityModelRateLimitKeys(model string) []string {
 }
 
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
+	return a.modelRateLimitTimeField(scope, "rate_limit_reset_at")
+}
+
+func (a *Account) modelRateLimitedAt(scope string) *time.Time {
+	return a.modelRateLimitTimeField(scope, "rate_limited_at")
+}
+
+func (a *Account) modelRateLimitReason(scope string) string {
 	if a == nil || a.Extra == nil || scope == "" {
+		return ""
+	}
+	rawLimits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	rawLimit, ok := rawLimits[scope].(map[string]any)
+	if !ok {
+		return ""
+	}
+	raw, ok := rawLimit["reason"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(raw)
+}
+
+func (a *Account) modelRateLimitTimeField(scope, field string) *time.Time {
+	if a == nil || a.Extra == nil || scope == "" || field == "" {
 		return nil
 	}
 	rawLimits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
@@ -177,13 +311,13 @@ func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 	if !ok {
 		return nil
 	}
-	resetAtRaw, ok := rawLimit["rate_limit_reset_at"].(string)
-	if !ok || strings.TrimSpace(resetAtRaw) == "" {
+	raw, ok := rawLimit[field].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	resetAt, err := time.Parse(time.RFC3339, resetAtRaw)
+	parsed, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
 		return nil
 	}
-	return &resetAt
+	return &parsed
 }

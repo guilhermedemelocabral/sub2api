@@ -543,3 +543,107 @@ func TestIsAnthropicFableModel(t *testing.T) {
 	require.False(t, isAnthropicFableModel("claude-sonnet-4-6"))
 	require.False(t, isAnthropicFableModel(""))
 }
+
+func TestAntigravityGeminiLockReprobesAfterCooldown(t *testing.T) {
+	limitedAt := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	resetAt := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"gemini-3.8-flash-high": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": resetAt,
+				},
+				antigravityGeminiModelRateLimitKey: map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": resetAt,
+				},
+			},
+		},
+	}
+
+	require.False(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-high"),
+		"stale weekly Gemini lock must not keep the account unschedulable")
+	require.Zero(t, account.GetRateLimitRemainingTimeWithContext(context.Background(), "gemini-3.8-flash-high"))
+}
+
+func TestAntigravityGeminiLockHonorsFreshCooldown(t *testing.T) {
+	limitedAt := time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339)
+	resetAt := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"gemini-3.8-flash-high": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": resetAt,
+				},
+			},
+		},
+	}
+
+	require.True(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-high"),
+		"a Gemini 429 from a few seconds ago must still skip the account")
+	require.Greater(t, account.GetRateLimitRemainingTimeWithContext(context.Background(), "gemini-3.8-flash-high"), time.Duration(0))
+}
+
+func TestAntigravityClaudeLockDoesNotReprobe(t *testing.T) {
+	limitedAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	resetAt := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"claude-sonnet-4-6": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": resetAt,
+				},
+			},
+		},
+	}
+
+	require.True(t, account.isModelRateLimitedWithContext(context.Background(), "claude-sonnet-4-6"),
+		"Claude locks must keep honoring the upstream reset")
+}
+
+func TestAntigravityGeminiReprobeCanBeDisabled(t *testing.T) {
+	prev := antigravityGeminiReprobeCooldownNs.Load()
+	t.Cleanup(func() { antigravityGeminiReprobeCooldownNs.Store(prev) })
+	t.Setenv(antigravityGeminiReprobeSecondsEnv, "")
+	ApplyAntigravityGeminiReprobeSeconds(0)
+
+	limitedAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	resetAt := time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"gemini-3.8-flash-high": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": resetAt,
+				},
+			},
+		},
+	}
+	require.True(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-high"))
+}
+
+func TestCapAntigravityGeminiRateLimitReset(t *testing.T) {
+	week := time.Now().Add(166 * time.Hour)
+	got := capAntigravityGeminiRateLimitReset("gemini-3.8-flash-high", week)
+	require.WithinDuration(t, time.Now().Add(defaultAntigravityGeminiReprobeCooldown), got, 2*time.Second)
+
+	short := time.Now().Add(20 * time.Second)
+	got = capAntigravityGeminiRateLimitReset("gemini-3.8-flash-high", short)
+	require.WithinDuration(t, short, got, time.Second)
+
+	got = capAntigravityGeminiRateLimitReset("claude-sonnet-4-5", week)
+	require.Equal(t, week, got)
+}
+
+func TestCapAntigravityGeminiRateLimitReset_QuotaExhaustedStillReprobes(t *testing.T) {
+	week := time.Now().Add(166 * time.Hour)
+	got := capAntigravityGeminiRateLimitResetWithCategory("gemini-3.8-flash-high", week, antigravity429QuotaExhausted)
+	require.WithinDuration(t, time.Now().Add(defaultAntigravityGeminiReprobeCooldown), got, 2*time.Second)
+}
