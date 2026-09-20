@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeStepfunEventDropsEmptyToolIdentity(t *testing.T) {
 	event := map[string]any{
@@ -83,5 +86,55 @@ func TestNormalizeRemoteEventUnknownPlatformIsNoop(t *testing.T) {
 	agent, ok := out["agent"]
 	if !ok || agent != "" {
 		t.Fatal("gemini must keep empty agent")
+	}
+}
+
+func TestContinueNudgeForTruncatedAnswer(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "q"}, map[string]any{"role": "assistant", "content": "partial"}},
+	}
+	origLen := len(body["messages"].([]any))
+	next := BuildContinueRequest("betallm", body, ContinueHint{Reasoning: false, CodeFence: false})
+	if len(body["messages"].([]any)) != origLen {
+		t.Fatal("BuildContinueRequest must not mutate the caller's messages")
+	}
+	msgs := next["messages"].([]any)
+	last := msgs[len(msgs)-1].(map[string]any)
+	if last["role"] != "user" {
+		t.Fatal("nudge must be a user message")
+	}
+	if !strings.Contains(last["content"].(string), "Continue from the exact point") {
+		t.Fatalf("generic nudge missing: %v", last["content"])
+	}
+}
+
+func TestContinueNudgeForTruncatedReasoning(t *testing.T) {
+	next := BuildContinueRequest("betallm", map[string]any{
+		"messages": []any{map[string]any{"role": "assistant", "content": ""}},
+	}, ContinueHint{Reasoning: true})
+	last := next["messages"].([]any)[1].(map[string]any)
+	if !strings.Contains(last["content"].(string), "private reasoning") {
+		t.Fatalf("reasoning nudge missing: %v", last["content"])
+	}
+}
+
+func TestContinueNudgeForOpenCodeFence(t *testing.T) {
+	next := BuildContinueRequest("stepfun", map[string]any{
+		"messages": []any{map[string]any{"role": "assistant", "content": "```python\nprint(1)"}},
+	}, ContinueHint{CodeFence: true})
+	last := next["messages"].([]any)[1].(map[string]any)
+	if !strings.Contains(last["content"].(string), "unterminated code block") {
+		t.Fatalf("code nudge missing: %v", last["content"])
+	}
+}
+
+func TestFinishLengthLoopCapsAtThree(t *testing.T) {
+	attempts := 0
+	final, reason := ContinueUntilStop(3, func() (string, string) {
+		attempts++
+		return "tok", "length"
+	})
+	if attempts != 3 || reason != "length" || final != "toktoktok" {
+		t.Fatalf("attempts=%d reason=%s final=%q", attempts, reason, final)
 	}
 }

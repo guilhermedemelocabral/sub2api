@@ -148,3 +148,58 @@ func normalizeStepfunEvent(event map[string]any) map[string]any {
 	}
 	return event
 }
+
+// ContinueHint selects which measured nudge to append after a truncated completion.
+type ContinueHint struct {
+	Reasoning bool
+	CodeFence bool
+}
+
+const (
+	continueNudgeGeneric    = "Continue from the exact point the previous assistant message stopped. Do not restart or restate. Produce the next tokens of the same answer."
+	continueNudgeReasoning  = "Your previous turn was cut off inside your private reasoning. The assistant message above is your own unfinished scratchpad, not an answer you gave. Continue reasoning from exactly where it stopped, close the reasoning block, then write the complete answer."
+	continueNudgeCode       = "The previous assistant message stopped inside an unterminated code block. Resume from its exact last character. Do not repeat any line already written, do not reopen the code fence, do not add commentary before the code, and do not restate the task. Emit only the continuation."
+	defaultContinueAttempts = 3
+)
+
+// BuildContinueRequest returns a copy of body with a user nudge appended.
+// platform is accepted so the caller can route; these helpers stay generic
+// and do not consult Gemini/DefaultGeminiPlatform.
+func BuildContinueRequest(platform string, body map[string]any, hint ContinueHint) map[string]any {
+	_ = platform
+	next := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		next[k] = v
+	}
+	var messages []any
+	if raw, ok := body["messages"].([]any); ok {
+		messages = append([]any(nil), raw...)
+	}
+	nudge := continueNudgeGeneric
+	if hint.Reasoning {
+		nudge = continueNudgeReasoning
+	} else if hint.CodeFence {
+		nudge = continueNudgeCode
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": nudge})
+	next["messages"] = messages
+	return next
+}
+
+// ContinueUntilStop concatenates attempt content until finish_reason is not
+// "length" or maxAttempts is reached. A non-positive maxAttempts defaults to 3.
+func ContinueUntilStop(maxAttempts int, attempt func() (string, string)) (string, string) {
+	if maxAttempts <= 0 {
+		maxAttempts = defaultContinueAttempts
+	}
+	var final, reason string
+	for i := 0; i < maxAttempts; i++ {
+		content, finish := attempt()
+		final += content
+		reason = finish
+		if finish != "length" {
+			break
+		}
+	}
+	return final, reason
+}
