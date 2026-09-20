@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -136,5 +137,132 @@ func TestFinishLengthLoopCapsAtThree(t *testing.T) {
 	})
 	if attempts != 3 || reason != "length" || final != "toktoktok" {
 		t.Fatalf("attempts=%d reason=%s final=%q", attempts, reason, final)
+	}
+}
+
+func TestPrepareRemoteRequestGeminiLeavesBodyUnchanged(t *testing.T) {
+	body := map[string]any{
+		"reasoning_effort": "none",
+		"max_tokens":       128,
+		"context_length":   16,
+		"messages":         []any{map[string]any{"role": "user", "content": "q"}},
+		"keep":             true,
+	}
+	out := PrepareRemoteRequest("gemini", "gemini-2.5-flash", body)
+	if out["reasoning_effort"] != "none" {
+		t.Fatalf("gemini must keep reasoning_effort: %v", out["reasoning_effort"])
+	}
+	if _, ok := out["thinking"]; ok {
+		t.Fatal("gemini must not inject thinking")
+	}
+	if out["max_tokens"] != 128 {
+		t.Fatalf("gemini must not clamp max_tokens: %v", out["max_tokens"])
+	}
+	if out["keep"] != true {
+		t.Fatal("gemini must return the same body fields")
+	}
+}
+
+func TestPrepareRemoteRequestBetaLLMThinkingOffDisablesThinking(t *testing.T) {
+	for _, platform := range []string{"betallm", "beta-llm"} {
+		body := map[string]any{
+			"reasoning_effort": "none",
+			"messages":         []any{map[string]any{"role": "user", "content": "q"}},
+		}
+		out := PrepareRemoteRequest(platform, "glm", body)
+		thinking, ok := out["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "disabled" {
+			t.Fatalf("%s thinking-off: got %#v", platform, out["thinking"])
+		}
+		if _, exists := out["reasoning_effort"]; exists {
+			t.Fatalf("%s must drop reasoning_effort=none (it still thinks upstream)", platform)
+		}
+	}
+}
+
+func TestPrepareRemoteRequestBetaLLMThinkingOffAlias(t *testing.T) {
+	out := PrepareRemoteRequest("betallm", "glm", map[string]any{"reasoning_effort": "off"})
+	thinking, _ := out["thinking"].(map[string]any)
+	if thinking["type"] != "disabled" {
+		t.Fatalf("thinking=%#v", out["thinking"])
+	}
+	if _, exists := out["reasoning_effort"]; exists {
+		t.Fatal("reasoning_effort=off must be removed on BetaLLM")
+	}
+}
+
+func TestPrepareRemoteRequestStepfunOffMapsToLow(t *testing.T) {
+	for _, platform := range []string{"stepfun", "step-plan", "step"} {
+		for _, effort := range []string{"off", "none"} {
+			out := PrepareRemoteRequest(platform, "step-2", map[string]any{"reasoning_effort": effort})
+			if out["reasoning_effort"] != "low" {
+				t.Fatalf("%s effort %q: got %#v", platform, effort, out["reasoning_effort"])
+			}
+		}
+	}
+}
+
+func TestPrepareRemoteRequestClampsMaxTokensToContext(t *testing.T) {
+	messages := []any{map[string]any{"role": "user", "content": "hi"}}
+	promptJSON, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptEst := len(promptJSON)
+	if promptEst < 1 {
+		promptEst = 1
+	}
+	// remaining = context - promptEst - 1 = 10
+	body := map[string]any{
+		"messages":       messages,
+		"context_length": promptEst + 10 + 1,
+		"max_tokens":     100,
+	}
+	out := PrepareRemoteRequest("betallm", "glm", body)
+	got, ok := asRemoteInt(out["max_tokens"])
+	if !ok || got != 10 {
+		t.Fatalf("clamped max_tokens=%v (promptEst=%d)", out["max_tokens"], promptEst)
+	}
+}
+
+func TestPrepareRemoteRequestSkipsClampWhenRemainingNonPositive(t *testing.T) {
+	messages := []any{map[string]any{"role": "user", "content": "this-is-a-long-prompt-for-overflow"}}
+	body := map[string]any{
+		"messages":       messages,
+		"context_length": 4,
+		"max_tokens":     50,
+	}
+	out := PrepareRemoteRequest("stepfun", "step-2", body)
+	got, ok := asRemoteInt(out["max_tokens"])
+	if !ok || got != 50 {
+		t.Fatalf("overflow must skip clamp, got %#v", out["max_tokens"])
+	}
+}
+
+func asRemoteInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+func TestShouldApplyRemoteOpenAICompatContractSkipsGemini(t *testing.T) {
+	if shouldApplyRemoteOpenAICompatContract(&Account{Platform: "gemini"}) {
+		t.Fatal("gemini must skip")
+	}
+	if shouldApplyRemoteOpenAICompatContract(&Account{Platform: "antigravity"}) {
+		t.Fatal("antigravity must skip")
+	}
+	if shouldApplyRemoteOpenAICompatContract(&Account{Platform: "google"}) {
+		t.Fatal("google must skip")
+	}
+	if !shouldApplyRemoteOpenAICompatContract(&Account{Platform: "openai", Name: "betallm"}) {
+		t.Fatal("openai-compat must apply")
 	}
 }

@@ -1,6 +1,9 @@
 package service
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // NormalizeRemoteEvent sanitizes one Chat completion or chunk for a remote
 // platform. Gemini and other unknown platforms are returned unchanged.
@@ -202,4 +205,128 @@ func ContinueUntilStop(maxAttempts int, attempt func() (string, string)) (string
 		}
 	}
 	return final, reason
+}
+
+// PrepareRemoteRequest rewrites an OpenAI-compat Chat Completions body for a
+// remote vendor. Gemini/Antigravity (DefaultGeminiPlatform) are returned
+// unchanged. BetaLLM cannot disable thinking via reasoning_effort=none/off;
+// those values are replaced with thinking.type=disabled and the effort field
+// is removed. Step cannot disable thinking: off/none is mapped to low.
+//
+// When body.context_length is known and max_tokens/max_completion_tokens is
+// set, the completion budget is clamped so
+// prompt_est + max_tokens + 1 <= context_length, where prompt_est is
+// max(1, len(json(messages))). If the remaining window is <= 0 this layer
+// cannot reject the request, so the clamp is skipped (do not invent a
+// 1-token generation).
+func PrepareRemoteRequest(platform, model string, body map[string]any) map[string]any {
+	_ = model
+	if body == nil || DefaultGeminiPlatform(platform) {
+		return body
+	}
+	switch remoteVendorFamily(platform) {
+	case "betallm":
+		applyBetaLLMThinkingOff(body)
+	case "step":
+		applyStepEffortFloor(body)
+	}
+	clampRemoteMaxTokens(body)
+	return body
+}
+
+func remoteVendorFamily(platform string) string {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "betallm", "beta-llm":
+		return "betallm"
+	case "stepfun", "step-plan", "step":
+		return "step"
+	default:
+		return ""
+	}
+}
+
+func isRemoteEffortOff(v any) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "none", "off":
+		return true
+	default:
+		return false
+	}
+}
+
+func applyBetaLLMThinkingOff(body map[string]any) {
+	if !isRemoteEffortOff(body["reasoning_effort"]) {
+		return
+	}
+	body["thinking"] = map[string]any{"type": "disabled"}
+	delete(body, "reasoning_effort")
+}
+
+func applyStepEffortFloor(body map[string]any) {
+	if !isRemoteEffortOff(body["reasoning_effort"]) {
+		return
+	}
+	body["reasoning_effort"] = "low"
+}
+
+func remoteNumericInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(i), true
+	default:
+		return 0, false
+	}
+}
+
+func estimatePromptTokens(body map[string]any) int {
+	raw, err := json.Marshal(body["messages"])
+	if err != nil {
+		return 1
+	}
+	if len(raw) < 1 {
+		return 1
+	}
+	return len(raw)
+}
+
+func clampRemoteMaxTokens(body map[string]any) {
+	ctxLen, ok := remoteNumericInt(body["context_length"])
+	if !ok || ctxLen <= 0 {
+		return
+	}
+	remaining := ctxLen - estimatePromptTokens(body) - 1
+	// Overflow: cannot reject here. Leave max_tokens as-is rather than
+	// sending a dummy 1-token generation.
+	if remaining <= 0 {
+		return
+	}
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		raw, exists := body[key]
+		if !exists {
+			continue
+		}
+		cur, ok := remoteNumericInt(raw)
+		if !ok {
+			continue
+		}
+		if cur > remaining {
+			body[key] = remaining
+		}
+	}
 }

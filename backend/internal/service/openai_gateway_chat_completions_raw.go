@@ -188,6 +188,8 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if customUA == "" && account.IsGrokOAuth() {
 		customUA = defaultGrokUpstreamUserAgent()
 	}
+	// Remote OpenAI-compat contract (effort/clamp). Gemini/Antigravity skipped.
+	upstreamBody = applyRemoteOpenAICompatRequest(account, upstreamModel, upstreamBody)
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
 	if err != nil {
 		return nil, err
@@ -242,10 +244,21 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	// 8. Forward response
 	var result *OpenAIForwardResult
 	var forwardErr error
+	var continueErr error
+	if !clientStream {
+		// NormalizeRemoteEvent + continue-on-length (max 3). Not used for stream.
+		resp, continueErr = s.applyRemoteNonStreamContract(ctx, c, account, resp, upstreamBody, targetURL, token, customUA, grokCacheIdentity)
+		if resp == nil && continueErr != nil {
+			return nil, continueErr
+		}
+	}
 	if clientStream {
 		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
 	} else {
 		result, forwardErr = s.bufferRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		if forwardErr == nil {
+			forwardErr = continueErr
+		}
 	}
 	if result != nil {
 		addOpenAIUsage(&result.Usage, bridgeUsage)
@@ -351,6 +364,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			}
 		}
 		line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
+		line = applyRemoteNormalizeSSELine(account, line)
 		line = stripEmptyChatToolCallIdentityFromSSELine(line)
 
 		writeLine(line)
