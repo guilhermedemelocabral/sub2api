@@ -1,8 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,4 +232,39 @@ func TestStartUpstreamCatalogPollerStopsOnContextCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stop did not return after context cancel")
 	}
+}
+
+func TestStartUpstreamCatalogPollerLogsListFailure(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	started := make(chan struct{})
+	listFn := func(ctx context.Context) ([]Account, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		return nil, errors.New("list boom")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := StartUpstreamCatalogPoller(ctx, &fakeCatalogSyncer{}, listFn)
+	defer stop()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected Tick on start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out := buf.String()
+		if strings.Contains(out, "tick_failed") && strings.Contains(out, "list boom") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log missing tick failure: %q", buf.String())
 }

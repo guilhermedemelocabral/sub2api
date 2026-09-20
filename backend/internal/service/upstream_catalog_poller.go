@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
 type CatalogSyncer interface {
@@ -124,6 +126,12 @@ func (p *UpstreamCatalogPoller) State(accountID int64) *catalogAccountState {
 	return copyCatalogAccountState(p.state[accountID])
 }
 
+func tickCatalogPoller(ctx context.Context, poller *UpstreamCatalogPoller) {
+	if err := poller.Tick(ctx); err != nil {
+		logger.LegacyPrintf("service.upstream_catalog_poller", "tick_failed: err=%v", err)
+	}
+}
+
 // StartUpstreamCatalogPoller runs Tick on one goroutine (immediate, then every Interval).
 // stop cancels the loop and waits for the goroutine to exit. It is idempotent.
 func StartUpstreamCatalogPoller(ctx context.Context, syncer CatalogSyncer, listFn func(context.Context) ([]Account, error)) (stop func()) {
@@ -141,13 +149,13 @@ func StartUpstreamCatalogPoller(ctx context.Context, syncer CatalogSyncer, listF
 		defer close(done)
 		ticker := time.NewTicker(poller.cfg.Interval)
 		defer ticker.Stop()
-		_ = poller.Tick(runCtx)
+		tickCatalogPoller(runCtx, poller)
 		for {
 			select {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				_ = poller.Tick(runCtx)
+				tickCatalogPoller(runCtx, poller)
 			}
 		}
 	}()
