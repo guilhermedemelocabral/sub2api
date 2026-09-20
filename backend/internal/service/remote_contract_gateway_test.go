@@ -110,6 +110,127 @@ func TestForwardAsRawChatCompletions_ContinueNudgeErrorKeepsPartial(t *testing.T
 	require.NotContains(t, rec.Body.String(), "nudge failed")
 }
 
+func TestForwardAsRawChatCompletions_ToolCallsNeverContinue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"glm","messages":[{"role":"user","content":"q"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_tool"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_1","choices":[{"index":0,"message":{"role":"assistant","content":"x","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"length"}]}`,
+			)),
+		},
+	}}
+	svc := &OpenAIGatewayService{cfg: remoteContractGatewayTestConfig(), httpUpstream: upstream}
+	account := remoteContractGatewayTestAccount("betallm")
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	require.Equal(t, "length", gjson.GetBytes(rec.Body.Bytes(), "choices.0.finish_reason").String())
+	require.Equal(t, "call_1", gjson.GetBytes(rec.Body.Bytes(), "choices.0.message.tool_calls.0.id").String())
+}
+
+func TestForwardAsRawChatCompletions_BlankStopRetriesOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"glm","messages":[{"role":"user","content":"q"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_blank"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_1","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":0,"total_tokens":4}}`,
+			)),
+		},
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_recovered"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_2","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`,
+			)),
+		},
+	}}
+	svc := &OpenAIGatewayService{cfg: remoteContractGatewayTestConfig(), httpUpstream: upstream}
+	account := remoteContractGatewayTestAccount("betallm")
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 2)
+	require.Contains(t, string(upstream.bodies[1]), "private reasoning")
+	require.Equal(t, "recovered", gjson.GetBytes(rec.Body.Bytes(), "choices.0.message.content").String())
+}
+
+func TestForwardAsRawChatCompletions_StreamContinuesOnLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"glm","messages":[{"role":"user","content":"q"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	shot1 := strings.Join([]string{
+		`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"glm","choices":[{"index":0,"delta":{"content":"Hello "},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"glm","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":4,"completion_tokens":8,"total_tokens":12}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	shot2 := strings.Join([]string{
+		`data: {"id":"chatcmpl_2","object":"chat.completion.chunk","model":"glm","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_2","object":"chat.completion.chunk","model":"glm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_stream_1"}},
+			Body:       io.NopCloser(strings.NewReader(shot1)),
+		},
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_stream_2"}},
+			Body:       io.NopCloser(strings.NewReader(shot2)),
+		},
+	}}
+	svc := &OpenAIGatewayService{cfg: remoteContractGatewayTestConfig(), httpUpstream: upstream}
+	account := remoteContractGatewayTestAccount("betallm")
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 2)
+	require.Contains(t, string(upstream.bodies[1]), "Continue from the exact point")
+	// The client sees one transparent stream: both deltas, a single
+	// terminal stop, a single [DONE]; the intermediate length terminal is
+	// swallowed, never forwarded.
+	out := rec.Body.String()
+	require.Contains(t, out, "Hello ")
+	require.Contains(t, out, "world")
+	require.NotContains(t, out, `"finish_reason":"length"`)
+	require.Equal(t, 1, strings.Count(out, `"finish_reason":"stop"`))
+	require.Equal(t, 1, strings.Count(out, "data: [DONE]"))
+}
+
 func TestForwardAsRawChatCompletions_NormalizesEmptyStepfunSSEIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

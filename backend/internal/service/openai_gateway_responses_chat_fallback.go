@@ -122,10 +122,11 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 		return s.handleErrorResponse(ctx, resp, c, account, chatBody, billingModel)
 	}
 
+	cont := newCCStreamContinueConfig(ctx, c, account, chatBody, targetURL, apiKey, account.GetOpenAIUserAgent(), "")
 	if clientStream {
-		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, cont)
 	}
-	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, cont)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
@@ -141,11 +142,35 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	cont *ccStreamContinueConfig,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	ccResp, usage, err := s.readCCUpstreamJSONResponse(c, resp, writeOpenAIResponsesFallbackError)
 	if err != nil {
 		return nil, err
+	}
+	var continueErr error
+	if cont != nil {
+		if raw, marshalErr := json.Marshal(ccResp); marshalErr == nil && remoteNonStreamNeedsContinue(raw) {
+			if event := parseRemoteJSONMap(raw); event != nil {
+				event, continueErr = s.RunContinueLoop(cont.ctx, cont.c, cont.account, cont.platform, event, cont.requestBody, cont.targetURL, cont.token, cont.customUA, cont.grokCacheIdentity)
+				// Copy back only the continued fields so the typed struct
+				// keeps every other fidelity bit (reasoning, usage, ids).
+				if event != nil && len(ccResp.Choices) > 0 {
+					if encoded, encErr := json.Marshal(firstChoiceMessageContent(event)); encErr == nil {
+						ccResp.Choices[0].Message.Content = encoded
+					}
+					ccResp.Choices[0].FinishReason = firstChoiceFinishReason(event)
+				}
+			}
+		}
+		if continueErr != nil {
+			logger.L().Warn("openai responses chat fallback: continue nudge failed",
+				zap.Error(continueErr),
+				zap.String("request_id", requestID),
+				zap.Int64("account_id", accountIDOrZero(cont.account)),
+			)
+		}
 	}
 	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
 	s.cacheReasoningItemsFromOutput(responsesResp.Output)
@@ -167,7 +192,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 		ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 		Stream:                      false,
 		Duration:                    time.Since(startTime),
-	}, nil
+	}, continueErr
 }
 
 func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
@@ -183,6 +208,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	cont *ccStreamContinueConfig,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
@@ -220,17 +246,116 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		c.Writer.Flush()
 	}
 
-	scan := s.scanCCStream(c, resp, "openai responses chat fallback", requestID, startTime, func(chunk *apicompat.ChatCompletionsChunk) {
-		events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, state)
-		s.cacheReasoningItemsFromEvents(events)
-		writeEvents(events)
-	})
+	currentResp := resp
+	var mergedUsage OpenAIUsage
+	var firstTokenMs *int
+	sawDone := false
+	contAttempt := 1
+	priorFinish := ""
+	for {
+		scan := s.scanCCStream(c, currentResp, "openai responses chat fallback", requestID, startTime, func(chunk *apicompat.ChatCompletionsChunk) {
+			events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, state)
+			s.cacheReasoningItemsFromEvents(events)
+			writeEvents(events)
+		})
+		addOpenAIUsage(&mergedUsage, scan.Usage)
+		if firstTokenMs == nil {
+			firstTokenMs = scan.FirstTokenMs
+		}
+		sawDone = scan.SawDone
+		if contAttempt > 1 && state.FinishReason == "" {
+			// The retry yielded no terminal chunk (empty EOF): keep the
+			// prior reason so a dead shot cannot clobber a length into a
+			// completed.
+			state.FinishReason = priorFinish
+		}
 
-	if scan.Err != nil {
+		if scan.Err != nil {
+			return &OpenAIForwardResult{
+				RequestID:                   requestID,
+				UpstreamHeaders:             currentResp.Header,
+				Usage:                       mergedUsage,
+				Model:                       originalModel,
+				BillingModel:                billingModel,
+				UpstreamModel:               upstreamModel,
+				ReasoningEffort:             reasoningEffort,
+				UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+				ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+				Stream:                      true,
+				Duration:                    time.Since(startTime),
+				FirstTokenMs:                firstTokenMs,
+			}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}
+
+		if cont == nil || clientDisconnected {
+			break
+		}
+		proceed, skip := shouldContinueCompletion(state.FinishReason, contAttempt, defaultContinueAttempts, len(state.ToolCalls) > 0, strings.TrimSpace(state.Text.String()) == "")
+		if !proceed {
+			logger.L().Debug("harness-continuation-end",
+				zap.Int64("account_id", accountIDOrZero(cont.account)),
+				zap.String("upstream_model", upstreamModel),
+				zap.Int("attempts", contAttempt),
+				zap.String("finish_reason", state.FinishReason),
+				zap.String("skip", skip),
+			)
+			break
+		}
+		logger.L().Debug("harness-continuation",
+			zap.Int64("account_id", accountIDOrZero(cont.account)),
+			zap.String("upstream_model", upstreamModel),
+			zap.Int("attempt", contAttempt+1),
+			zap.Int("max_attempts", defaultContinueAttempts),
+			zap.String("finish_reason", state.FinishReason),
+			zap.Bool("stream", true),
+		)
+		_ = currentResp.Body.Close()
+		nextResp, nudgeErr := s.postCCContinueStream(cont, state.Text.String())
+		if nudgeErr == nil && nextResp.StatusCode >= 400 {
+			_ = nextResp.Body.Close()
+			nudgeErr = fmt.Errorf("remote continue nudge: status %d", nextResp.StatusCode)
+		}
+		if nudgeErr != nil {
+			if cont.ctx.Err() != nil {
+				break
+			}
+			logger.L().Warn("openai responses chat fallback: continue nudge failed",
+				zap.Error(nudgeErr),
+				zap.String("request_id", requestID),
+				zap.Int64("account_id", accountIDOrZero(cont.account)),
+			)
+			return &OpenAIForwardResult{
+				RequestID:                   requestID,
+				UpstreamHeaders:             currentResp.Header,
+				Usage:                       mergedUsage,
+				Model:                       originalModel,
+				BillingModel:                billingModel,
+				UpstreamModel:               upstreamModel,
+				ReasoningEffort:             reasoningEffort,
+				UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+				ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+				Stream:                      true,
+				Duration:                    time.Since(startTime),
+				FirstTokenMs:                firstTokenMs,
+			}, fmt.Errorf("continue nudge failed: %w", nudgeErr)
+		}
+		currentResp = nextResp
+		if rid := nextResp.Header.Get("x-request-id"); rid != "" {
+			requestID = rid
+		}
+		// The translator only records finish_reason per chunk; clear it so
+		// the next shot's terminal state is observed fresh while the
+		// accumulated text/reasoning builders keep appending transparently.
+		priorFinish = state.FinishReason
+		state.FinishReason = ""
+		contAttempt++
+	}
+
+	buildResult := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
 			RequestID:                   requestID,
-			UpstreamHeaders:             resp.Header,
-			Usage:                       scan.Usage,
+			UpstreamHeaders:             currentResp.Header,
+			Usage:                       mergedUsage,
 			Model:                       originalModel,
 			BillingModel:                billingModel,
 			UpstreamModel:               upstreamModel,
@@ -239,26 +364,22 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 			Stream:                      true,
 			Duration:                    time.Since(startTime),
-			FirstTokenMs:                scan.FirstTokenMs,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+			FirstTokenMs:                firstTokenMs,
+		}
 	}
 	if err := state.ValidateToolCallArguments(); err != nil {
-		return &OpenAIForwardResult{
-			RequestID:                   requestID,
-			UpstreamHeaders:             resp.Header,
-			Usage:                       scan.Usage,
-			Model:                       originalModel,
-			BillingModel:                billingModel,
-			UpstreamModel:               upstreamModel,
-			ReasoningEffort:             reasoningEffort,
-			UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
-			ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-			Stream:                      true,
-			Duration:                    time.Since(startTime),
-			FirstTokenMs:                scan.FirstTokenMs,
-		}, fmt.Errorf("invalid tool call arguments from upstream: %w", err)
+		return buildResult(), fmt.Errorf("invalid tool call arguments from upstream: %w", err)
 	}
 
+	if contAttempt > 1 {
+		// Multi-shot turn: the completed event must report merged spend,
+		// not just the last shot's counters.
+		state.Usage = &apicompat.ResponsesUsage{
+			InputTokens:  mergedUsage.InputTokens,
+			OutputTokens: mergedUsage.OutputTokens,
+			TotalTokens:  mergedUsage.InputTokens + mergedUsage.OutputTokens,
+		}
+	}
 	finalEvents := apicompat.FinalizeChatCompletionsResponsesStream(state)
 	s.cacheReasoningItemsFromEvents(finalEvents)
 	writeEvents(finalEvents)
@@ -271,24 +392,11 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			c.Writer.Flush()
 		}
 	}
-	if !scan.SawDone {
+	if !sawDone {
 		logCCStreamMissingDoneSentinel("openai responses chat fallback", requestID)
 	}
 
-	return &OpenAIForwardResult{
-		RequestID:                   requestID,
-		UpstreamHeaders:             resp.Header,
-		Usage:                       scan.Usage,
-		Model:                       originalModel,
-		BillingModel:                billingModel,
-		UpstreamModel:               upstreamModel,
-		ReasoningEffort:             reasoningEffort,
-		UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
-		ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		Stream:                      true,
-		Duration:                    time.Since(startTime),
-		FirstTokenMs:                scan.FirstTokenMs,
-	}, nil
+	return buildResult(), nil
 }
 
 func chatChunkStartsResponsesOutput(chunk *apicompat.ChatCompletionsChunk) bool {

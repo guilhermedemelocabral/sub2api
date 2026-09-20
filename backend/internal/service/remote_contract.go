@@ -190,8 +190,76 @@ func BuildContinueRequest(platform string, body map[string]any, hint ContinueHin
 	return next
 }
 
+// ContinueAttempt is one generation shot inside a transparent continuation
+// chain. Content is the user-visible text produced by the shot, Finish is
+// its finish_reason, and HasToolCalls reports whether the shot emitted tool
+// calls (which must never be continued: the client owns the tool turn).
+type ContinueAttempt struct {
+	Content      string
+	Finish       string
+	HasToolCalls bool
+}
+
+// shouldContinueCompletion mirrors LLMBoost's should_continue_completion:
+// bounded multi-shot stitching behind one client request. attempt is
+// 1-based; at most maxAttempts shots are produced in total. It returns the
+// proceed decision plus a skip reason for turn-end telemetry ("" when
+// proceeding, mirroring LLMBoost's "none").
+func shouldContinueCompletion(finish string, attempt, maxAttempts int, hasToolCalls bool, contentEmpty bool) (bool, string) {
+	if maxAttempts <= 0 {
+		maxAttempts = defaultContinueAttempts
+	}
+	if attempt >= maxAttempts {
+		return false, "max-attempts"
+	}
+	if hasToolCalls {
+		return false, "tool-calls-present"
+	}
+	normalized := strings.ToLower(strings.TrimSpace(finish))
+	if normalized == "length" {
+		return true, ""
+	}
+	if normalized == "" {
+		// No terminal event: the stream broke mid-turn. Broken-stream
+		// salvage stays disabled (LLMBoost's continuation_retry_broken_stream
+		// default); the existing truncation/failover path owns that case.
+		return false, "broken-stream"
+	}
+	if normalized == "stop" && contentEmpty {
+		// Blank stop: upstream ended cleanly but produced nothing
+		// user-visible. One bounded nudge retries the same account instead
+		// of handing the client an empty success.
+		return true, ""
+	}
+	return false, "finish-reason-not-continuable:" + normalized
+}
+
+// ContinueUntilStopEx concatenates attempt content while
+// shouldContinueCompletion proceeds. It returns the concatenated content,
+// the final finish_reason, and the number of shots consumed.
+func ContinueUntilStopEx(maxAttempts int, attempt func(attempt int) ContinueAttempt) (string, string, int) {
+	if maxAttempts <= 0 {
+		maxAttempts = defaultContinueAttempts
+	}
+	var final, reason string
+	shots := 0
+	for n := 1; n <= maxAttempts; n++ {
+		got := attempt(n)
+		final += got.Content
+		reason = got.Finish
+		shots = n
+		proceed, _ := shouldContinueCompletion(got.Finish, n, maxAttempts, got.HasToolCalls, strings.TrimSpace(final) == "")
+		if !proceed {
+			break
+		}
+	}
+	return final, reason, shots
+}
+
 // ContinueUntilStop concatenates attempt content until finish_reason is not
 // "length" or maxAttempts is reached. A non-positive maxAttempts defaults to 3.
+// It keeps the historical length-only contract; new call sites that observe
+// tool calls or blank stops must use ContinueUntilStopEx instead.
 func ContinueUntilStop(maxAttempts int, attempt func() (string, string)) (string, string) {
 	if maxAttempts <= 0 {
 		maxAttempts = defaultContinueAttempts

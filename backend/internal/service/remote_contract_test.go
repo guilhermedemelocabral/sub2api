@@ -140,6 +140,49 @@ func TestFinishLengthLoopCapsAtThree(t *testing.T) {
 	}
 }
 
+func TestShouldContinueCompletionDecisionTable(t *testing.T) {
+	tests := []struct {
+		name         string
+		finish       string
+		attempt      int
+		hasTools     bool
+		contentEmpty bool
+		wantProceed  bool
+		wantSkip     string
+	}{
+		{"length continues", "length", 1, false, false, true, ""},
+		{"length is case-insensitive", "LENGTH", 1, false, false, true, ""},
+		{"length at cap stops", "length", 3, false, false, false, "max-attempts"},
+		{"tool calls never continue", "length", 1, true, false, false, "tool-calls-present"},
+		{"blank stop retries", "stop", 1, false, true, true, ""},
+		{"stop with content ends", "stop", 1, false, false, false, "finish-reason-not-continuable:stop"},
+		{"tool_calls finish ends", "tool_calls", 1, true, false, false, "tool-calls-present"},
+		{"missing terminal ends", "", 1, false, true, false, "broken-stream"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proceed, skip := shouldContinueCompletion(tt.finish, tt.attempt, defaultContinueAttempts, tt.hasTools, tt.contentEmpty)
+			if proceed != tt.wantProceed || skip != tt.wantSkip {
+				t.Fatalf("proceed=%v skip=%q, want %v %q", proceed, skip, tt.wantProceed, tt.wantSkip)
+			}
+		})
+	}
+}
+
+func TestContinueUntilStopExStopsOnToolCalls(t *testing.T) {
+	calls := 0
+	final, reason, shots := ContinueUntilStopEx(3, func(n int) ContinueAttempt {
+		calls++
+		if n == 1 {
+			return ContinueAttempt{Content: "part", Finish: "length"}
+		}
+		return ContinueAttempt{Content: "", Finish: "tool_calls", HasToolCalls: true}
+	})
+	if calls != 2 || shots != 2 || reason != "tool_calls" || final != "part" {
+		t.Fatalf("calls=%d shots=%d reason=%s final=%q", calls, shots, reason, final)
+	}
+}
+
 func TestPrepareRemoteRequestGeminiLeavesBodyUnchanged(t *testing.T) {
 	body := map[string]any{
 		"reasoning_effort": "none",

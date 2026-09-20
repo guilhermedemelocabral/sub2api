@@ -220,7 +220,7 @@ func TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit(t
 	require.NotContains(t, rec.Body.String(), "data: [DONE]")
 }
 
-func TestForwardResponses_DeepSeekReasoningOnlyStreamProducesVisibleText(t *testing.T) {
+func TestForwardResponses_DeepSeekReasoningOnlyStreamContinuesOnLength(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"deepseek-reasoner","input":"hello","stream":true}`)
@@ -229,7 +229,9 @@ func TestForwardResponses_DeepSeekReasoningOnlyStreamProducesVisibleText(t *test
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	upstreamBody := strings.Join([]string{
+	// Shot 1 ends length inside reasoning: the harness must continue with a
+	// nudge instead of surfacing a truncated turn.
+	shot1 := strings.Join([]string{
 		`data: {"id":"chatcmpl_reasoning","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""},"finish_reason":null}]}`,
 		"",
 		`data: {"id":"chatcmpl_reasoning","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"reasoning_content":"visible fallback"},"finish_reason":null}]}`,
@@ -239,10 +241,24 @@ func TestForwardResponses_DeepSeekReasoningOnlyStreamProducesVisibleText(t *test
 		"data: [DONE]",
 		"",
 	}, "\n")
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_deepseek_reasoning_responses_stream"}},
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	shot2 := strings.Join([]string{
+		`data: {"id":"chatcmpl_reasoning2","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":"continued answer"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_reasoning2","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	newStreamResp := func(id, payload string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{id}},
+			Body:       io.NopCloser(strings.NewReader(payload)),
+		}
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newStreamResp("rid_deepseek_reasoning_cont_1", shot1),
+		newStreamResp("rid_deepseek_reasoning_cont_2", shot2),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
@@ -253,10 +269,107 @@ func TestForwardResponses_DeepSeekReasoningOnlyStreamProducesVisibleText(t *test
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Stream)
-	require.Contains(t, rec.Body.String(), "event: response.output_text.delta")
-	require.Contains(t, rec.Body.String(), `"delta":"visible fallback"`)
-	require.Contains(t, rec.Body.String(), `"status":"incomplete"`)
-	require.Contains(t, rec.Body.String(), "data: [DONE]")
+	require.Len(t, upstream.bodies, 2)
+	// The second POST is the continuation nudge, not a replay: it carries
+	// the assistant partial plus the measured nudge.
+	require.Contains(t, string(upstream.bodies[1]), "private reasoning")
+	out := rec.Body.String()
+	// One transparent client stream: both shots' text, a single completed
+	// event, usage merged across shots (4+10 in, 3+5 out).
+	require.Contains(t, out, `"delta":"visible fallback"`)
+	require.Contains(t, out, `"delta":"continued answer"`)
+	require.Contains(t, out, `"status":"completed"`)
+	require.NotContains(t, out, `"status":"incomplete"`)
+	require.Equal(t, 1, strings.Count(out, "event: response.completed"))
+	require.Contains(t, out, "data: [DONE]")
+	require.Equal(t, 14, result.Usage.InputTokens)
+	require.Equal(t, 8, result.Usage.OutputTokens)
+}
+
+func TestForwardResponses_ExhaustedContinuationSurfacesIncomplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-reasoner","input":"hello","stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// Every shot ends length: after max attempts the harness must surface
+	// the honest incomplete status instead of looping forever.
+	shot := strings.Join([]string{
+		`data: {"id":"chatcmpl_reasoning","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_reasoning","object":"chat.completion.chunk","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	newStreamResp := func(id string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{id}},
+			Body:       io.NopCloser(strings.NewReader(shot)),
+		}
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		newStreamResp("rid_deepseek_reasoning_exh_1"),
+		newStreamResp("rid_deepseek_reasoning_exh_2"),
+		newStreamResp("rid_deepseek_reasoning_exh_3"),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+
+	result, err := svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 3)
+	out := rec.Body.String()
+	require.Contains(t, out, `"status":"incomplete"`)
+	require.Equal(t, 1, strings.Count(out, "event: response.completed"))
+	require.Contains(t, out, "data: [DONE]")
+}
+
+func TestForwardResponses_NonStreamContinuesOnLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-chat","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_resp_len"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_1","object":"chat.completion","model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"Hello "},"finish_reason":"length"}],"usage":{"prompt_tokens":4,"completion_tokens":8,"total_tokens":12}}`,
+			)),
+		},
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_resp_stop"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_2","object":"chat.completion","model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}`,
+			)),
+		},
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+
+	result, err := svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 2)
+	out := rec.Body.String()
+	require.Contains(t, out, "Hello world")
+	require.Contains(t, out, `"status":"completed"`)
+	require.NotContains(t, out, `"status":"incomplete"`)
 }
 
 func TestForwardResponses_AutoSupportedAccountStillUsesResponsesEndpoint(t *testing.T) {
