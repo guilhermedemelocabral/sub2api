@@ -39,6 +39,7 @@ type UpstreamModelMetadata struct {
 	MaxContextWindow         int64                      `json:"max_context_window,omitempty"`
 	MaxOutputTokens          int64                      `json:"max_output_tokens,omitempty"`
 	CodexToolCapabilities    map[string]json.RawMessage `json:"codex_tool_capabilities,omitempty"`
+	Card                     json.RawMessage            `json:"card,omitempty"`
 }
 
 type UpstreamModelMetadataSnapshot struct {
@@ -412,6 +413,14 @@ func upstreamModelMetadataIsComplete(metadata UpstreamModelMetadata) bool {
 	return true
 }
 
+func shouldPersistUpstreamModelMetadata(metadata UpstreamModelMetadata) bool {
+	return upstreamModelMetadataIsComplete(metadata) || upstreamModelCardIsPublishable(metadata)
+}
+
+func upstreamModelCardIsPublishable(metadata UpstreamModelMetadata) bool {
+	return len(metadata.Card) > 0 && (metadata.ContextWindow > 0 || metadata.MaxOutputTokens > 0)
+}
+
 func completeUpstreamModelMetadataSubset(
 	modelIDs []string,
 	metadata map[string]UpstreamModelMetadata,
@@ -426,7 +435,7 @@ func completeUpstreamModelMetadataSubset(
 			continue
 		}
 		entry, ok := metadata[modelID]
-		if !ok || !upstreamModelMetadataIsComplete(entry) {
+		if !ok || !shouldPersistUpstreamModelMetadata(entry) {
 			continue
 		}
 		if strings.TrimSpace(entry.ID) == "" {
@@ -1255,14 +1264,22 @@ type upstreamModelCapabilityEntry struct {
 	Description              string                     `json:"description"`
 	Reasoning                *bool                      `json:"reasoning"`
 	DefaultReasoningLevel    string                     `json:"default_reasoning_level"`
+	ReasoningEffort          string                     `json:"reasoning_effort"`
 	SupportedReasoningLevels []json.RawMessage          `json:"supported_reasoning_levels"`
+	ReasoningEffortOptions   []json.RawMessage          `json:"reasoning_effort_options"`
 	ReasoningOptions         []modelsDevReasoningOption `json:"reasoning_options"`
 	InputModalities          []string                   `json:"input_modalities"`
 	Modalities               modelsDevModalities        `json:"modalities"`
+	Architecture             upstreamModelArchitecture  `json:"architecture"`
 	ContextWindow            int64                      `json:"context_window"`
 	MaxContextWindow         int64                      `json:"max_context_window"`
 	MaxOutputTokens          int64                      `json:"max_output_tokens"`
+	MaxCompletionTokens      int64                      `json:"max_completion_tokens"`
 	Limit                    modelsDevLimit             `json:"limit"`
+}
+
+type upstreamModelArchitecture struct {
+	InputModalities []string `json:"input_modalities"`
 }
 
 func extractUpstreamModelIDs(body []byte) ([]string, error) {
@@ -1296,6 +1313,7 @@ func extractUpstreamModelCatalog(body []byte, grok bool) ([]string, map[string]U
 		}
 		models = append(models, modelID)
 		entry := upstreamMetadataFromCapabilityEntry(modelID, capability)
+		entry.Card = append(json.RawMessage(nil), raw...)
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err == nil {
 			entry.CodexToolCapabilities = make(map[string]json.RawMessage)
@@ -1329,6 +1347,9 @@ func extractUpstreamModelRawEntries(body []byte) ([]json.RawMessage, error) {
 func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapabilityEntry) UpstreamModelMetadata {
 	levels := reasoningLevelsFromRawEntries(entry.SupportedReasoningLevels)
 	if len(levels) == 0 {
+		levels = reasoningLevelsFromRawEntries(entry.ReasoningEffortOptions)
+	}
+	if len(levels) == 0 {
 		levels = reasoningLevelsFromModelsDevOptions(entry.ReasoningOptions)
 	}
 	reasoning := entry.Reasoning
@@ -1337,6 +1358,9 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 		reasoning = &inferred
 	}
 	modalities := entry.InputModalities
+	if len(modalities) == 0 {
+		modalities = entry.Architecture.InputModalities
+	}
 	if len(modalities) == 0 {
 		modalities = entry.Modalities.Input
 	}
@@ -1349,9 +1373,15 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 	}
 	maxOutputTokens := entry.MaxOutputTokens
 	if maxOutputTokens <= 0 {
+		maxOutputTokens = entry.MaxCompletionTokens
+	}
+	if maxOutputTokens <= 0 {
 		maxOutputTokens = entry.Limit.Output
 	}
 	defaultReasoningLevel := normalizeReasoningLevel(entry.DefaultReasoningLevel)
+	if defaultReasoningLevel == "" {
+		defaultReasoningLevel = normalizeReasoningLevel(entry.ReasoningEffort)
+	}
 	if defaultReasoningLevel == "" && len(levels) > 0 {
 		defaultReasoningLevel = levels[0]
 	}
@@ -1412,7 +1442,9 @@ func normalizeReasoningLevel(level string) string {
 	level = strings.ToLower(strings.TrimSpace(level))
 	switch level {
 	case "off", "disabled":
-		return "none"
+		return "off"
+	case "med":
+		return "med"
 	case "extra-high", "extra_high":
 		return "xhigh"
 	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":

@@ -1147,14 +1147,15 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 			if len(source) == 0 {
 				source = defaultModelIDsForPlatform(service.PlatformComposite)
 			}
-			writeAllowlistedModelsList(c, service.PlatformComposite, apiKey.Group.ModelAllowlist.FilterForListing(source))
+			ids := apiKey.Group.ModelAllowlist.FilterForListing(source)
+			writeOpenAIModelsListWithCards(c, ids, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, ids))
 			return
 		}
 		if len(availableModels) > 0 {
-			writeModelsList(c, service.PlatformComposite, availableModels)
+			writeOpenAIModelsListWithCards(c, availableModels, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, availableModels))
 			return
 		}
-		writeModelsList(c, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite))
+		writeOpenAIModelsListWithCards(c, defaultModelIDsForPlatform(service.PlatformComposite), nil)
 		return
 	}
 
@@ -1162,11 +1163,20 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 		source := modelListingSource(platform, availableModels, defaultModelIDsForPlatform(platform))
-		writeAllowlistedModelsList(c, platform, apiKey.Group.ModelAllowlist.FilterForListing(source))
+		ids := apiKey.Group.ModelAllowlist.FilterForListing(source)
+		if platform == service.PlatformOpenAI {
+			writeOpenAIModelsListWithCards(c, ids, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, ids))
+			return
+		}
+		writeAllowlistedModelsList(c, platform, ids)
 		return
 	}
 
 	if len(availableModels) > 0 {
+		if platform == service.PlatformOpenAI {
+			writeOpenAIModelsListWithCards(c, availableModels, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, availableModels))
+			return
+		}
 		writeModelsList(c, platform, availableModels)
 		return
 	}
@@ -1382,28 +1392,191 @@ func grokModelSupportsConfigurableReasoning(modelID string) bool {
 	}
 }
 
-func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
-	defaultsByID := make(map[string]openai.Model, len(openai.DefaultModels))
-	for _, model := range openai.DefaultModels {
-		defaultsByID[model.ID] = model
-	}
+type catalogEntry struct {
+	Slug       string
+	UpstreamID string
+	Platform   string
+}
 
-	models := make([]openai.Model, 0, len(modelIDs))
+func listedCatalogEntries(modelIDs []string) []catalogEntry {
+	entries := make([]catalogEntry, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
-		if model, ok := defaultsByID[modelID]; ok {
-			models = append(models, model)
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
 			continue
 		}
-		models = append(models, openai.Model{
-			ID:          modelID,
-			Object:      "model",
-			Created:     1704067200,
-			OwnedBy:     "openai",
-			Type:        "model",
-			DisplayName: modelID,
-		})
+		entries = append(entries, catalogEntry{UpstreamID: modelID})
+	}
+	return entries
+}
+
+func inferManagedCatalogSlug(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
+	switch normalized {
+	case "minimax":
+		return "minimax"
+	case "commandcode":
+		return "commandcode"
+	case "betallm":
+		return "betallm"
+	case "stepfun":
+		return "stepfun"
+	case "llmboost":
+		return "llmboost"
+	default:
+		return ""
+	}
+}
+
+func keepBarePublicModelID(entry catalogEntry, modelID string) bool {
+	switch strings.ToLower(strings.TrimSpace(entry.Platform)) {
+	case service.PlatformGemini, service.PlatformAntigravity:
+		return true
+	}
+	lower := strings.ToLower(modelID)
+	return strings.HasPrefix(lower, "gemini")
+}
+
+// publicModelIDs assigns {slug}/{id} only when the same upstream id appears on
+// two or more managed openai-compat accounts. Unique ids stay bare. Gemini and
+// Antigravity entries are never rewritten. Unknown slugs are not invented.
+func publicModelIDs(entries []catalogEntry) []string {
+	type resolved struct {
+		slug     string
+		id       string
+		keepBare bool
+	}
+	resolvedEntries := make([]resolved, 0, len(entries))
+	counts := make(map[string]int)
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.UpstreamID)
+		if id == "" {
+			continue
+		}
+		item := resolved{id: id}
+		if keepBarePublicModelID(entry, id) {
+			item.keepBare = true
+			resolvedEntries = append(resolvedEntries, item)
+			continue
+		}
+		item.slug = inferManagedCatalogSlug(entry.Slug)
+		if item.slug == "" {
+			item.slug = inferManagedCatalogSlug(entry.Platform)
+		}
+		if !strings.Contains(id, "/") {
+			counts[id]++
+		}
+		resolvedEntries = append(resolvedEntries, item)
+	}
+	out := make([]string, 0, len(resolvedEntries))
+	for _, item := range resolvedEntries {
+		if item.keepBare || strings.Contains(item.id, "/") || item.slug == "" || counts[item.id] <= 1 {
+			out = append(out, item.id)
+			continue
+		}
+		out = append(out, item.slug+"/"+item.id)
+	}
+	return out
+}
+
+func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
+	writeOpenAIModelsListWithCards(c, modelIDs, nil)
+}
+
+func writeOpenAIModelsListWithCards(c *gin.Context, modelIDs []string, cards map[string]service.UpstreamModelMetadata) {
+	modelIDs = publicModelIDs(listedCatalogEntries(modelIDs))
+	if len(cards) == 0 {
+		defaultsByID := make(map[string]openai.Model, len(openai.DefaultModels))
+		for _, model := range openai.DefaultModels {
+			defaultsByID[model.ID] = model
+		}
+
+		models := make([]openai.Model, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			if model, ok := defaultsByID[modelID]; ok {
+				models = append(models, model)
+				continue
+			}
+			models = append(models, openai.Model{
+				ID:          modelID,
+				Object:      "model",
+				Created:     1704067200,
+				OwnedBy:     "openai",
+				Type:        "model",
+				DisplayName: modelID,
+			})
+		}
+		writeModelsListResponse(c, models)
+		return
+	}
+
+	models := make([]map[string]any, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		models = append(models, publicOpenAIModelCard(modelID, cards[modelID]))
 	}
 	writeModelsListResponse(c, models)
+}
+
+func publicOpenAIModelCard(modelID string, meta service.UpstreamModelMetadata) map[string]any {
+	item := map[string]any{
+		"id":           modelID,
+		"object":       "model",
+		"created":      int64(1704067200),
+		"owned_by":     "openai",
+		"type":         "model",
+		"display_name": modelID,
+	}
+	for _, model := range openai.DefaultModels {
+		if model.ID == modelID {
+			item["created"] = model.Created
+			item["owned_by"] = model.OwnedBy
+			item["display_name"] = model.DisplayName
+			break
+		}
+	}
+	if len(meta.Card) > 0 {
+		var card map[string]any
+		if json.Unmarshal(meta.Card, &card) == nil {
+			for key, value := range card {
+				if key == "id" || key == "object" {
+					continue
+				}
+				item[key] = value
+			}
+		}
+	}
+	if strings.TrimSpace(meta.DisplayName) != "" {
+		item["display_name"] = meta.DisplayName
+	}
+	if meta.ContextWindow > 0 {
+		item["context_window"] = meta.ContextWindow
+	}
+	if meta.MaxOutputTokens > 0 {
+		item["max_output_tokens"] = meta.MaxOutputTokens
+		if _, ok := item["max_completion_tokens"]; !ok {
+			item["max_completion_tokens"] = meta.MaxOutputTokens
+		}
+	}
+	if meta.Reasoning != nil {
+		item["reasoning"] = *meta.Reasoning
+	}
+	if strings.TrimSpace(meta.DefaultReasoningLevel) != "" {
+		if _, ok := item["reasoning_effort"]; !ok {
+			item["reasoning_effort"] = meta.DefaultReasoningLevel
+		}
+	}
+	if len(meta.SupportedReasoningLevels) > 0 {
+		if _, ok := item["reasoning_effort_options"]; !ok {
+			item["reasoning_effort_options"] = meta.SupportedReasoningLevels
+		}
+	}
+	if len(meta.InputModalities) > 0 {
+		if _, ok := item["architecture"]; !ok {
+			item["architecture"] = map[string]any{"input_modalities": meta.InputModalities}
+		}
+	}
+	return item
 }
 
 // modelListingSource 汇总模型列表过滤的候选来源：账号映射键（availableModels）

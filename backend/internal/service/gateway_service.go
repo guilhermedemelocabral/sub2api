@@ -1463,6 +1463,57 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	return cloneStringSlice(models)
 }
 
+// GetUpstreamModelCards returns the last-synced upstream model cards for the
+// public IDs in a group. Mapping keys are public names; snapshot entries are
+// keyed by the upstream id when they differ.
+func (s *GatewayService) GetUpstreamModelCards(ctx context.Context, groupID *int64, publicIDs []string) map[string]UpstreamModelMetadata {
+	if s == nil || s.accountRepo == nil || len(publicIDs) == 0 {
+		return nil
+	}
+	var accounts []Account
+	var err error
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(publicIDs))
+	for _, id := range publicIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	cards := make(map[string]UpstreamModelMetadata)
+	for i := range accounts {
+		account := &accounts[i]
+		mapping := account.GetModelMapping()
+		for publicID := range wanted {
+			if _, ok := cards[publicID]; ok {
+				continue
+			}
+			upstreamID := publicID
+			if mapped := strings.TrimSpace(mapping[publicID]); mapped != "" {
+				upstreamID = mapped
+			}
+			if meta, ok := account.GetUpstreamModelMetadata(upstreamID); ok {
+				cards[publicID] = meta
+				continue
+			}
+			if meta, ok := account.GetUpstreamModelMetadata(publicID); ok {
+				cards[publicID] = meta
+			}
+		}
+	}
+	if len(cards) == 0 {
+		return nil
+	}
+	return cards
+}
+
 func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, groupID int64, model string) (CompositeModelOwnership, error) {
 	model = strings.TrimSpace(model)
 	if s == nil || s.accountRepo == nil || groupID <= 0 || model == "" {

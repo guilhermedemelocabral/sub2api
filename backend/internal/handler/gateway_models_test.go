@@ -1315,3 +1315,198 @@ func modelIDsForTest(models []gatewayModelItemForTest) []string {
 	}
 	return ids
 }
+
+func TestGatewayModels_OpenAIListPublishesUpstreamModelCards(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(81)
+	reasoning := true
+	h := newGatewayModelsHandlerForTest(
+		&gatewayModelsAccountRepoStub{
+			byGroup: map[int64][]service.Account{
+				groupID: {
+					{
+						ID:       16,
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{
+								"Qwen3.8-Flash-Next-vLLM": "Qwen3.8-Flash-Next-vLLM",
+							},
+						},
+						Extra: map[string]any{
+							service.UpstreamModelMetadataExtraKey: service.UpstreamModelMetadataSnapshot{
+								Source: "upstream",
+								Models: map[string]service.UpstreamModelMetadata{
+									"Qwen3.8-Flash-Next-vLLM": {
+										ID:                       "Qwen3.8-Flash-Next-vLLM",
+										Reasoning:                &reasoning,
+										DefaultReasoningLevel:    "xhigh",
+										SupportedReasoningLevels: []string{"off", "low", "med", "xhigh"},
+										ContextWindow:            262144,
+										MaxOutputTokens:          262144,
+										Card: json.RawMessage(`{
+											"id":"Qwen3.8-Flash-Next-vLLM",
+											"owned_by":"s1-vllm",
+											"context_window":262144,
+											"max_output_tokens":262144,
+											"reasoning":true,
+											"reasoning_effort":"xhigh",
+											"reasoning_effort_options":["off","low","med","xhigh"],
+											"llmboost":{"runtime_status":"available"}
+										}`),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			ID:       groupID,
+			Platform: service.PlatformOpenAI,
+			ModelAllowlist: service.GroupModelAllowlist{
+				Enabled: true,
+				Models:  []string{"Qwen3.8-Flash-Next-vLLM"},
+			},
+		},
+	})
+
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Data, 1)
+	item := got.Data[0]
+	require.Equal(t, "Qwen3.8-Flash-Next-vLLM", item["id"])
+	require.Equal(t, float64(262144), item["context_window"])
+	require.Equal(t, float64(262144), item["max_output_tokens"])
+	require.Equal(t, true, item["reasoning"])
+	require.Equal(t, "xhigh", item["reasoning_effort"])
+	require.Equal(t, []any{"off", "low", "med", "xhigh"}, item["reasoning_effort_options"])
+	require.Equal(t, "s1-vllm", item["owned_by"])
+	require.Equal(t, "available", item["llmboost"].(map[string]any)["runtime_status"])
+}
+
+func TestGatewayModels_CompositeListPublishesUpstreamModelCards(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(82)
+	reasoning := true
+	h := newGatewayModelsHandlerForTest(
+		&gatewayModelsAccountRepoStub{
+			byGroup: map[int64][]service.Account{
+				groupID: {
+					{ID: 1, Platform: service.PlatformAntigravity},
+					{
+						ID:       16,
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{
+								"stepfun-step-5-preview": "stepfun-step-5-preview",
+							},
+						},
+						Extra: map[string]any{
+							service.UpstreamModelMetadataExtraKey: service.UpstreamModelMetadataSnapshot{
+								Source: "upstream",
+								Models: map[string]service.UpstreamModelMetadata{
+									"stepfun-step-5-preview": {
+										ID:                    "stepfun-step-5-preview",
+										Reasoning:             &reasoning,
+										DefaultReasoningLevel: "high",
+										ContextWindow:         1024000,
+										Card: json.RawMessage(`{
+											"id":"stepfun-step-5-preview",
+											"owned_by":"stepfun",
+											"context_window":1024000,
+											"reasoning":true,
+											"reasoning_effort":"high",
+											"reasoning_effort_options":["low","medium","high"]
+										}`),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			ID:       groupID,
+			Platform: service.PlatformComposite,
+			ModelAllowlist: service.GroupModelAllowlist{
+				Enabled: true,
+				Models:  []string{"gemini-3.8-flash", "stepfun-step-5-preview"},
+			},
+		},
+	})
+
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	byID := make(map[string]map[string]any, len(got.Data))
+	for _, item := range got.Data {
+		id, _ := item["id"].(string)
+		byID[id] = item
+	}
+	require.Contains(t, byID, "stepfun-step-5-preview")
+	item := byID["stepfun-step-5-preview"]
+	require.Equal(t, float64(1024000), item["context_window"])
+	require.Equal(t, true, item["reasoning"])
+	require.Equal(t, "high", item["reasoning_effort"])
+	require.Equal(t, "stepfun", item["owned_by"])
+}
+
+func TestPublicModelIDPrefixesOnCollision(t *testing.T) {
+	got := publicModelIDs([]catalogEntry{
+		{Slug: "stepfun", UpstreamID: "shared"},
+		{Slug: "betallm", UpstreamID: "shared"},
+		{Slug: "llmboost", UpstreamID: "unique-local"},
+	})
+	require.Contains(t, got, "stepfun/shared")
+	require.Contains(t, got, "betallm/shared")
+	require.Contains(t, got, "unique-local")
+	require.NotContains(t, got, "shared")
+}
+
+func TestPublicModelIDs_DoesNotRewriteGeminiIDs(t *testing.T) {
+	got := publicModelIDs([]catalogEntry{
+		{Slug: "stepfun", Platform: "gemini", UpstreamID: "gemini-2.5-flash"},
+		{Slug: "betallm", Platform: "gemini", UpstreamID: "gemini-2.5-flash"},
+		{Slug: "llmboost", UpstreamID: "gemini-3.8-flash"},
+	})
+	require.Contains(t, got, "gemini-2.5-flash")
+	require.Contains(t, got, "gemini-3.8-flash")
+	require.NotContains(t, got, "stepfun/gemini-2.5-flash")
+	require.NotContains(t, got, "betallm/gemini-2.5-flash")
+	require.NotContains(t, got, "llmboost/gemini-3.8-flash")
+}
+
+func TestPublicModelIDs_SkipsUnknownSlugAndExistingPrefix(t *testing.T) {
+	got := publicModelIDs([]catalogEntry{
+		{Slug: "unknown-host", UpstreamID: "shared"},
+		{Slug: "also-unknown", UpstreamID: "shared"},
+		{Slug: "stepfun", UpstreamID: "minimax/already"},
+		{Slug: "betallm", UpstreamID: "minimax/already"},
+	})
+	require.Equal(t, []string{"shared", "shared", "minimax/already", "minimax/already"}, got)
+}
