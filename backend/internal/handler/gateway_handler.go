@@ -1148,14 +1148,14 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 				source = defaultModelIDsForPlatform(service.PlatformComposite)
 			}
 			ids := apiKey.Group.ModelAllowlist.FilterForListing(source)
-			writeOpenAIModelsListWithCards(c, ids, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, ids))
+			h.writeOpenAIModelsListForGroup(c, groupID, service.PlatformComposite, ids)
 			return
 		}
 		if len(availableModels) > 0 {
-			writeOpenAIModelsListWithCards(c, availableModels, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, availableModels))
+			h.writeOpenAIModelsListForGroup(c, groupID, service.PlatformComposite, availableModels)
 			return
 		}
-		writeOpenAIModelsListWithCards(c, defaultModelIDsForPlatform(service.PlatformComposite), nil)
+		h.writeOpenAIModelsListForGroup(c, groupID, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite))
 		return
 	}
 
@@ -1165,7 +1165,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		source := modelListingSource(platform, availableModels, defaultModelIDsForPlatform(platform))
 		ids := apiKey.Group.ModelAllowlist.FilterForListing(source)
 		if platform == service.PlatformOpenAI {
-			writeOpenAIModelsListWithCards(c, ids, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, ids))
+			h.writeOpenAIModelsListForGroup(c, groupID, service.PlatformOpenAI, ids)
 			return
 		}
 		writeAllowlistedModelsList(c, platform, ids)
@@ -1174,7 +1174,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	if len(availableModels) > 0 {
 		if platform == service.PlatformOpenAI {
-			writeOpenAIModelsListWithCards(c, availableModels, h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, availableModels))
+			h.writeOpenAIModelsListForGroup(c, groupID, service.PlatformOpenAI, availableModels)
 			return
 		}
 		writeModelsList(c, platform, availableModels)
@@ -1480,6 +1480,177 @@ func publicModelIDs(entries []catalogEntry) []string {
 	return out
 }
 
+func advertisedManagedModelIDs(account *service.Account) []string {
+	if account == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || strings.Contains(id, "*") {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if snapshot := account.GetUpstreamModelMetadataSnapshot(); snapshot != nil {
+		for modelID, meta := range snapshot.Models {
+			add(modelID)
+			add(meta.ID)
+		}
+	}
+	for publicID := range account.GetModelMapping() {
+		add(publicID)
+	}
+	return ids
+}
+
+func skipGeminiOrAntigravityAccount(platform string) bool {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case service.PlatformGemini, service.PlatformAntigravity:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *GatewayHandler) managedCatalogEntries(ctx context.Context, groupID *int64, listingPlatform string) []catalogEntry {
+	if h == nil || h.gatewayService == nil {
+		return nil
+	}
+	accounts := h.gatewayService.ListSchedulableAccounts(ctx, groupID)
+	if listingPlatform == service.PlatformOpenAI {
+		for i := range accounts {
+			if accounts[i].Platform == service.PlatformOpenAI && accounts[i].IsOpenAIPassthroughEnabled() {
+				return nil
+			}
+		}
+	}
+	entries := make([]catalogEntry, 0)
+	for i := range accounts {
+		account := &accounts[i]
+		if skipGeminiOrAntigravityAccount(account.Platform) {
+			continue
+		}
+		if listingPlatform == service.PlatformOpenAI && account.Platform != service.PlatformOpenAI {
+			continue
+		}
+		slug := inferManagedCatalogSlug(account.Name)
+		if slug == "" {
+			slug = inferManagedCatalogSlug(account.Platform)
+		}
+		for _, modelID := range advertisedManagedModelIDs(account) {
+			entries = append(entries, catalogEntry{
+				Slug:       slug,
+				UpstreamID: modelID,
+				Platform:   account.Platform,
+			})
+		}
+	}
+	return entries
+}
+
+func (h *GatewayHandler) applyManagedPublicModelIDs(ctx context.Context, groupID *int64, listingPlatform string, listed []string) []string {
+	entries := h.managedCatalogEntries(ctx, groupID, listingPlatform)
+	if len(entries) == 0 {
+		return listed
+	}
+	prefixed := publicModelIDs(entries)
+	replacements := make(map[string][]string)
+	seenForBare := make(map[string]map[string]struct{})
+	j := 0
+	for _, entry := range entries {
+		bare := strings.TrimSpace(entry.UpstreamID)
+		if bare == "" {
+			continue
+		}
+		if j >= len(prefixed) {
+			break
+		}
+		pub := prefixed[j]
+		j++
+		if _, ok := seenForBare[bare]; !ok {
+			seenForBare[bare] = make(map[string]struct{})
+		}
+		if _, ok := seenForBare[bare][pub]; ok {
+			continue
+		}
+		seenForBare[bare][pub] = struct{}{}
+		replacements[bare] = append(replacements[bare], pub)
+	}
+	out := make([]string, 0, len(listed)+len(prefixed))
+	seen := make(map[string]struct{}, len(listed)+len(prefixed))
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range listed {
+		if pubs, ok := replacements[id]; ok {
+			for _, pub := range pubs {
+				add(pub)
+			}
+			continue
+		}
+		add(id)
+	}
+	return out
+}
+
+func cardLookupIDs(modelIDs []string) []string {
+	out := make([]string, 0, len(modelIDs)*2)
+	seen := make(map[string]struct{}, len(modelIDs)*2)
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range modelIDs {
+		add(id)
+		if i := strings.Index(id, "/"); i > 0 {
+			add(id[i+1:])
+		}
+	}
+	return out
+}
+
+func lookupPublicModelCard(cards map[string]service.UpstreamModelMetadata, modelID string) service.UpstreamModelMetadata {
+	if meta, ok := cards[modelID]; ok {
+		return meta
+	}
+	if i := strings.Index(modelID, "/"); i > 0 {
+		return cards[modelID[i+1:]]
+	}
+	return service.UpstreamModelMetadata{}
+}
+
+func (h *GatewayHandler) writeOpenAIModelsListForGroup(c *gin.Context, groupID *int64, listingPlatform string, modelIDs []string) {
+	if h != nil {
+		modelIDs = h.applyManagedPublicModelIDs(c.Request.Context(), groupID, listingPlatform, modelIDs)
+	}
+	var cards map[string]service.UpstreamModelMetadata
+	if h != nil && h.gatewayService != nil {
+		cards = h.gatewayService.GetUpstreamModelCards(c.Request.Context(), groupID, cardLookupIDs(modelIDs))
+	}
+	writeOpenAIModelsListWithCards(c, modelIDs, cards)
+}
+
 func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
 	writeOpenAIModelsListWithCards(c, modelIDs, nil)
 }
@@ -1513,7 +1684,7 @@ func writeOpenAIModelsListWithCards(c *gin.Context, modelIDs []string, cards map
 
 	models := make([]map[string]any, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
-		models = append(models, publicOpenAIModelCard(modelID, cards[modelID]))
+		models = append(models, publicOpenAIModelCard(modelID, lookupPublicModelCard(cards, modelID)))
 	}
 	writeModelsListResponse(c, models)
 }

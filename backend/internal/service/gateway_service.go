@@ -1463,6 +1463,23 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	return cloneStringSlice(models)
 }
 
+func (s *GatewayService) ListSchedulableAccounts(ctx context.Context, groupID *int64) []Account {
+	if s == nil || s.accountRepo == nil {
+		return nil
+	}
+	var accounts []Account
+	var err error
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	return accounts
+}
+
 // GetUpstreamModelCards returns the last-synced upstream model cards for the
 // public IDs in a group. Mapping keys are public names; snapshot entries are
 // keyed by the upstream id when they differ.

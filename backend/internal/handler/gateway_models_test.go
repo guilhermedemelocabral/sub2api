@@ -1510,3 +1510,95 @@ func TestPublicModelIDs_SkipsUnknownSlugAndExistingPrefix(t *testing.T) {
 	})
 	require.Equal(t, []string{"shared", "shared", "minimax/already", "minimax/already"}, got)
 }
+
+
+func TestGatewayModels_OpenAIListPrefixesCollidingManagedIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(91)
+	h := newGatewayModelsHandlerForTest(
+		&gatewayModelsAccountRepoStub{
+			byGroup: map[int64][]service.Account{
+				groupID: {
+					{
+						ID:       1,
+						Name:     "stepfun",
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"shared": "shared"},
+						},
+						Extra: map[string]any{
+							service.UpstreamModelMetadataExtraKey: service.UpstreamModelMetadataSnapshot{
+								Source: "upstream",
+								Models: map[string]service.UpstreamModelMetadata{
+									"shared": {ID: "shared"},
+								},
+							},
+						},
+					},
+					{
+						ID:       2,
+						Name:     "betallm",
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"shared": "shared"},
+						},
+						Extra: map[string]any{
+							service.UpstreamModelMetadataExtraKey: service.UpstreamModelMetadataSnapshot{
+								Source: "upstream",
+								Models: map[string]service.UpstreamModelMetadata{
+									"shared": {ID: "shared"},
+								},
+							},
+						},
+					},
+					{
+						ID:       3,
+						Name:     "llmboost",
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"unique-local": "unique-local"},
+						},
+					},
+					{
+						ID:       4,
+						Name:     "gemini-prod",
+						Platform: service.PlatformGemini,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"shared": "shared"},
+						},
+					},
+				},
+			},
+		},
+	)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			ID:       groupID,
+			Platform: service.PlatformOpenAI,
+		},
+	})
+
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := make([]string, 0, len(got.Data))
+	for _, item := range got.Data {
+		id, _ := item["id"].(string)
+		ids = append(ids, id)
+	}
+	require.Contains(t, ids, "stepfun/shared")
+	require.Contains(t, ids, "betallm/shared")
+	require.Contains(t, ids, "unique-local")
+	require.NotContains(t, ids, "shared")
+	require.NotContains(t, ids, "gemini/shared")
+	require.NotContains(t, ids, "gemini-prod/shared")
+}
