@@ -59,6 +59,25 @@ func NewUpstreamCatalogPoller(syncer CatalogSyncer, cfg CatalogPollerConfig) *Up
 	return &UpstreamCatalogPoller{syncer: syncer, cfg: cfg, state: map[int64]*catalogAccountState{}}
 }
 
+func copyCatalogAccountState(src *catalogAccountState) *catalogAccountState {
+	if src == nil {
+		return nil
+	}
+	dst := &catalogAccountState{
+		LastOK:    src.LastOK,
+		LastError: src.LastError,
+		Fresh:     src.Fresh,
+	}
+	if src.Catalog != nil {
+		cp := *src.Catalog
+		if len(src.Catalog.Models) > 0 {
+			cp.Models = append([]string(nil), src.Catalog.Models...)
+		}
+		dst.Catalog = &cp
+	}
+	return dst
+}
+
 func (p *UpstreamCatalogPoller) Tick(ctx context.Context) error {
 	if p == nil || p.syncer == nil || p.cfg.List == nil {
 		return nil
@@ -102,5 +121,5 @@ func (p *UpstreamCatalogPoller) State(accountID int64) *catalogAccountState {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.state[accountID]
+	return copyCatalogAccountState(p.state[accountID])
 }

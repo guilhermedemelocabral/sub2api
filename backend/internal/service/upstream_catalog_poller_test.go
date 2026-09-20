@@ -93,3 +93,46 @@ func TestCatalogPollerDropsAfterTTL(t *testing.T) {
 		t.Fatal("cache should be expired")
 	}
 }
+
+func TestCatalogPollerNoStateOnFirstError(t *testing.T) {
+	account := Account{ID: 9, Name: "stepfun", Platform: "openai"}
+	syncer := &fakeCatalogSyncer{err: errors.New("500")}
+	poller := NewUpstreamCatalogPoller(syncer, CatalogPollerConfig{
+		Interval: time.Hour,
+		StaleTTL: 15 * time.Minute,
+		Now:      func() time.Time { return time.Unix(0, 0) },
+		List:     func(context.Context) ([]Account, error) { return []Account{account}, nil },
+		IsGemini: DefaultGeminiPlatform,
+	})
+	if err := poller.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if poller.State(9) != nil {
+		t.Fatalf("State(9)=%+v want nil on first error", poller.State(9))
+	}
+}
+
+func TestCatalogPollerStateReturnsCopy(t *testing.T) {
+	account := Account{ID: 9, Name: "stepfun", Platform: "openai"}
+	syncer := &fakeCatalogSyncer{}
+	poller := NewUpstreamCatalogPoller(syncer, CatalogPollerConfig{
+		Interval: time.Hour,
+		StaleTTL: 15 * time.Minute,
+		Now:      func() time.Time { return time.Unix(1_000, 0) },
+		List:     func(context.Context) ([]Account, error) { return []Account{account}, nil },
+		IsGemini: DefaultGeminiPlatform,
+	})
+	if err := poller.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := poller.State(9)
+	if state == nil {
+		t.Fatal("expected state")
+	}
+	state.Fresh = false
+	state.Catalog.Models[0] = "mutated"
+	again := poller.State(9)
+	if again == nil || !again.Fresh || again.Catalog.Models[0] != "m1" {
+		t.Fatalf("State returned live map entry: %+v", again)
+	}
+}
