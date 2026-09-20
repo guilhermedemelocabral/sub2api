@@ -123,3 +123,64 @@ func (p *UpstreamCatalogPoller) State(accountID int64) *catalogAccountState {
 	defer p.mu.Unlock()
 	return copyCatalogAccountState(p.state[accountID])
 }
+
+// StartUpstreamCatalogPoller runs Tick on one goroutine (immediate, then every Interval).
+// stop cancels the loop and waits for the goroutine to exit. It is idempotent.
+func StartUpstreamCatalogPoller(ctx context.Context, syncer CatalogSyncer, listFn func(context.Context) ([]Account, error)) (stop func()) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	poller := NewUpstreamCatalogPoller(syncer, CatalogPollerConfig{
+		Interval: time.Minute,
+		StaleTTL: 15 * time.Minute,
+		List:     listFn,
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(poller.cfg.Interval)
+		defer ticker.Stop()
+		_ = poller.Tick(runCtx)
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				_ = poller.Tick(runCtx)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+}
+
+// UpstreamCatalogPollerRuntime is the process-wide catalog poller started on boot.
+type UpstreamCatalogPollerRuntime struct {
+	stop func()
+}
+
+func (r *UpstreamCatalogPollerRuntime) Stop() {
+	if r == nil || r.stop == nil {
+		return
+	}
+	r.stop()
+}
+
+// ProvideUpstreamCatalogPoller starts the catalog poller after repos exist.
+func ProvideUpstreamCatalogPoller(accountTestService *AccountTestService, accountRepo AccountRepository) *UpstreamCatalogPollerRuntime {
+	if accountTestService == nil || accountRepo == nil {
+		return &UpstreamCatalogPollerRuntime{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := StartUpstreamCatalogPoller(ctx, accountTestService, accountRepo.ListSchedulable)
+	return &UpstreamCatalogPollerRuntime{stop: func() {
+		stop()
+		cancel()
+	}}
+}

@@ -136,3 +136,97 @@ func TestCatalogPollerStateReturnsCopy(t *testing.T) {
 		t.Fatalf("State returned live map entry: %+v", again)
 	}
 }
+
+func TestStartUpstreamCatalogPollerTicksOnceAndStops(t *testing.T) {
+	var mu sync.Mutex
+	inFlight := 0
+	maxInFlight := 0
+	calls := 0
+	started := make(chan struct{})
+
+	listFn := func(ctx context.Context) ([]Account, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		calls++
+		if calls == 1 {
+			close(started)
+		}
+		mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+		case <-time.After(20 * time.Millisecond):
+		}
+
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return []Account{{ID: 1, Platform: "openai"}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := StartUpstreamCatalogPoller(ctx, &fakeCatalogSyncer{}, listFn)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected immediate Tick on start")
+	}
+	stop()
+	stop() // idempotent
+
+	mu.Lock()
+	gotCalls := calls
+	gotMax := maxInFlight
+	mu.Unlock()
+	if gotCalls < 1 {
+		t.Fatal("expected at least one Tick")
+	}
+	if gotMax > 1 {
+		t.Fatalf("concurrent Ticks: maxInFlight=%d", gotMax)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	if calls != gotCalls {
+		t.Fatalf("Tick after stop: %d -> %d", gotCalls, calls)
+	}
+	mu.Unlock()
+}
+
+func TestStartUpstreamCatalogPollerStopsOnContextCancel(t *testing.T) {
+	started := make(chan struct{})
+	listFn := func(ctx context.Context) ([]Account, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		return []Account{{ID: 2, Platform: "openai"}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := StartUpstreamCatalogPoller(ctx, &fakeCatalogSyncer{}, listFn)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		cancel()
+		stop()
+		t.Fatal("expected immediate Tick on start")
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not return after context cancel")
+	}
+}
