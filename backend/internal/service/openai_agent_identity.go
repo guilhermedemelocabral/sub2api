@@ -388,7 +388,7 @@ func (s *OpenAIGatewayService) buildOpenAIAuthenticationHeaders(ctx context.Cont
 		}
 		return agentHeaders, nil
 	}
-	headers.Set("Authorization", "Bearer "+token)
+	setOpenAIAPIKeyAuthHeader(headers, credAccount, token)
 	return headers, nil
 }
 

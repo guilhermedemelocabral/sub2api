@@ -44,11 +44,13 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 
 	responsesReq, err := apicompat.ChatCompletionsToResponses(&ccReq)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, originalModel, err)
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 
 	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(responsesReq)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, originalModel, err)
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	anthropicReq.Stream = clientStream
@@ -58,7 +60,60 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 		return nil, fmt.Errorf("marshal chat completions compat request: %w", err)
 	}
 
-	return s.forwardClaudeBodyAsChatCompletions(ctx, c, account, claudeBody, originalModel, clientStream, includeUsage, startTime, body)
+	return s.forwardClaudeBodyAsChatCompletions(ctx, c, account, claudeBody, originalModel, clientStream, includeUsage, startTime, body, ccClientOmittedMaxTokens(&ccReq))
+}
+
+// ccClientOmittedMaxTokens reports whether a Chat Completions client set no
+// positive output limit (neither max_tokens nor max_completion_tokens).
+func ccClientOmittedMaxTokens(req *apicompat.ChatCompletionsRequest) bool {
+	if req == nil {
+		return true
+	}
+	return (req.MaxTokens == nil || *req.MaxTokens <= 0) &&
+		(req.MaxCompletionTokens == nil || *req.MaxCompletionTokens <= 0)
+}
+
+// responsesClientOmittedMaxTokens reports whether a Responses client set no
+// positive max_output_tokens.
+func responsesClientOmittedMaxTokens(req *apicompat.ResponsesRequest) bool {
+	return req == nil || req.MaxOutputTokens == nil || *req.MaxOutputTokens <= 0
+}
+
+// rewriteGeminiMaxOutputTokens replaces generationConfig.maxOutputTokens on an
+// already-converted Gemini request. It exists because the CC/Responses→Anthropic
+// bridge must fill Anthropic's required max_tokens with 8192 when the client
+// omits any output limit, and that bridge default must not become the Gemini
+// cap: Gemini 3.x thinking tokens count against the same budget, so the visible
+// answer gets truncated with MAX_TOKENS (or goes blank when thinking consumes
+// the whole budget). fullBudget > 0 sends an explicit full budget (Antigravity
+// v1internal, matching buildGenerationConfig's 64000 default); fullBudget <= 0
+// removes the field so native Gemini applies the model's own default.
+func rewriteGeminiMaxOutputTokens(geminiReq []byte, fullBudget int) []byte {
+	var req map[string]any
+	if err := json.Unmarshal(geminiReq, &req); err != nil {
+		return geminiReq
+	}
+	cfg, _ := req["generationConfig"].(map[string]any)
+	if cfg == nil {
+		if fullBudget <= 0 {
+			return geminiReq
+		}
+		cfg = make(map[string]any)
+		req["generationConfig"] = cfg
+	}
+	if fullBudget > 0 {
+		cfg["maxOutputTokens"] = fullBudget
+	} else {
+		delete(cfg, "maxOutputTokens")
+		if len(cfg) == 0 {
+			delete(req, "generationConfig")
+		}
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return geminiReq
+	}
+	return out
 }
 
 func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
@@ -71,6 +126,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	includeUsage bool,
 	startTime time.Time,
 	originalChatBody []byte,
+	clientOmittedMaxTokens bool,
 ) (*ForwardResult, error) {
 	var req struct {
 		Model  string `json:"model"`
@@ -91,6 +147,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
+	if clientOmittedMaxTokens {
+		geminiReq = rewriteGeminiMaxOutputTokens(geminiReq, 0)
 	}
 	geminiReq = ensureGeminiFunctionCallThoughtSignatures(geminiReq)
 

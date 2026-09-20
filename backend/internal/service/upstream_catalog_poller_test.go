@@ -1,11 +1,8 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -235,10 +232,12 @@ func TestStartUpstreamCatalogPollerStopsOnContextCancel(t *testing.T) {
 }
 
 func TestStartUpstreamCatalogPollerLogsListFailure(t *testing.T) {
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(prev) })
+	// Capture via the structured-log sink, not the stdlib log: LegacyPrintf only
+	// falls back to the stdlib log while the global logger is uninitialized, and
+	// other tests in this package call logger.Init, which permanently routes the
+	// message to zap instead. The shared helper also serializes log capture.
+	sink, release := captureStructuredLog(t)
+	defer release()
 
 	started := make(chan struct{})
 	listFn := func(ctx context.Context) ([]Account, error) {
@@ -260,11 +259,10 @@ func TestStartUpstreamCatalogPollerLogsListFailure(t *testing.T) {
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		out := buf.String()
-		if strings.Contains(out, "tick_failed") && strings.Contains(out, "list boom") {
+		if sink.ContainsMessage("tick_failed") && sink.ContainsMessage("list boom") {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("log missing tick failure: %q", buf.String())
+	t.Fatal("log missing tick failure")
 }

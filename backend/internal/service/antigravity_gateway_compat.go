@@ -32,14 +32,15 @@ const (
 const antigravityCompatMaxTokens = 64000
 
 type antigravityCompatRequest struct {
-	protocol        antigravityCompatProtocol
-	originalBody    []byte
-	claudeBody      []byte
-	originalModel   string
-	clientStream    bool
-	includeUsage    bool
-	startTime       time.Time
-	reasoningEffort *string
+	protocol               antigravityCompatProtocol
+	originalBody           []byte
+	claudeBody             []byte
+	originalModel          string
+	clientStream           bool
+	includeUsage           bool
+	startTime              time.Time
+	reasoningEffort        *string
+	clientOmittedMaxTokens bool
 }
 
 type antigravityCompatUpstreamCall struct {
@@ -73,10 +74,12 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 
 	responsesRequest, err := apicompat.ChatCompletionsToResponses(&request)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, request.Model, err)
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	claudeRequest, err := apicompat.ResponsesToAnthropicRequest(responsesRequest)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, request.Model, err)
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	preserveChatCompletionTokenLimit(&request, claudeRequest)
@@ -87,14 +90,15 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 	}
 
 	return s.forwardAntigravityCompat(ctx, c, account, antigravityCompatRequest{
-		protocol:        antigravityCompatChatCompletions,
-		originalBody:    body,
-		claudeBody:      claudeBody,
-		originalModel:   request.Model,
-		clientStream:    request.Stream,
-		includeUsage:    request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
-		startTime:       time.Now(),
-		reasoningEffort: extractCCReasoningEffortFromBody(body),
+		protocol:               antigravityCompatChatCompletions,
+		originalBody:           body,
+		claudeBody:             claudeBody,
+		originalModel:          request.Model,
+		clientStream:           request.Stream,
+		includeUsage:           request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
+		startTime:              time.Now(),
+		reasoningEffort:        extractCCReasoningEffortFromBody(body),
+		clientOmittedMaxTokens: ccClientOmittedMaxTokens(&request),
 	})
 }
 
@@ -120,6 +124,7 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 
 	claudeRequest, err := apicompat.ResponsesToAnthropicRequest(&request)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, request.Model, err)
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	claudeRequest.Stream = request.Stream
@@ -129,13 +134,14 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	}
 
 	return s.forwardAntigravityCompat(ctx, c, account, antigravityCompatRequest{
-		protocol:        antigravityCompatResponses,
-		originalBody:    body,
-		claudeBody:      claudeBody,
-		originalModel:   request.Model,
-		clientStream:    request.Stream,
-		startTime:       time.Now(),
-		reasoningEffort: ExtractResponsesReasoningEffortFromBody(body),
+		protocol:               antigravityCompatResponses,
+		originalBody:           body,
+		claudeBody:             claudeBody,
+		originalModel:          request.Model,
+		clientStream:           request.Stream,
+		startTime:              time.Now(),
+		reasoningEffort:        ExtractResponsesReasoningEffortFromBody(body),
+		clientOmittedMaxTokens: responsesClientOmittedMaxTokens(&request),
 	})
 }
 
@@ -238,7 +244,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		_ = s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
 	}
-	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel)
+	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel, request.clientOmittedMaxTokens)
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
 	}
@@ -260,11 +266,15 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	claudeRequest *antigravity.ClaudeRequest,
 	projectID string,
 	mappedModel string,
+	clientOmittedMaxTokens bool,
 ) ([]byte, error) {
 	if strings.HasPrefix(strings.ToLower(mappedModel), "gemini-") {
 		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 		if err != nil {
 			return nil, err
+		}
+		if clientOmittedMaxTokens {
+			body = rewriteGeminiMaxOutputTokens(body, antigravityCompatMaxTokens)
 		}
 		body, err = enableMixedGeminiToolInvocations(body)
 		if err != nil {

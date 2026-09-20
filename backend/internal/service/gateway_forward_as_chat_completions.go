@@ -38,6 +38,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	// 1. Parse Chat Completions request
 	var ccReq apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &ccReq); err != nil {
+		appendRequestTranslationErrorEvent(c, account, "", err)
 		return nil, fmt.Errorf("parse chat completions request: %w", err)
 	}
 	originalModel := ccReq.Model
@@ -47,11 +48,13 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	// 2. Convert CC → Responses → Anthropic (chained conversion)
 	responsesReq, err := apicompat.ChatCompletionsToResponses(&ccReq)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, originalModel, err)
 		return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 	}
 
 	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(responsesReq)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, originalModel, err)
 		return nil, fmt.Errorf("convert responses to anthropic: %w", err)
 	}
 

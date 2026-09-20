@@ -48,12 +48,14 @@ func (s *GatewayService) ForwardAsResponses(
 	// 1. Lower Codex client-side tools to function tools understood by Anthropic.
 	adaptedBody, clientToolMapping, err := adaptResponsesClientToolsForAnthropic(body)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, "", err)
 		return nil, fmt.Errorf("adapt responses client tools: %w", err)
 	}
 
 	// 2. Parse Responses request
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(adaptedBody, &responsesReq); err != nil {
+		appendRequestTranslationErrorEvent(c, account, "", err)
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
 	originalModel := responsesReq.Model
@@ -62,6 +64,7 @@ func (s *GatewayService) ForwardAsResponses(
 	// 3. Convert Responses → Anthropic
 	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(&responsesReq)
 	if err != nil {
+		appendRequestTranslationErrorEvent(c, account, originalModel, err)
 		return nil, fmt.Errorf("convert responses to anthropic: %w", err)
 	}
 

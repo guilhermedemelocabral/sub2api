@@ -71,7 +71,7 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 	}
 	upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamProfile(upstreamReq.Context(), HTTPUpstreamProfileOpenAI))
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+	setOpenAIAPIKeyAuthHeader(upstreamReq.Header, account, apiKey)
 	upstreamReq.Header.Set("Accept", "application/json")
 	for key, values := range c.Request.Header {
 		lowerKey := strings.ToLower(key)

@@ -20,9 +20,11 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const (
@@ -212,6 +214,7 @@ func enqueueOpsErrorLog(ops *service.OpsService, entry *service.OpsInsertErrorLo
 	if ops == nil || entry == nil {
 		return
 	}
+	logOpsErrorEntry(entry)
 	entry.UserAgent = normalizeOpsPersistentUserAgent(entry.UserAgent)
 	if entry.ErrorBody != "" {
 		originalBody := entry.ErrorBody
@@ -267,6 +270,36 @@ func enqueueOpsErrorLog(ops *service.OpsService, entry *service.OpsInsertErrorLo
 
 func normalizeOpsPersistentUserAgent(value string) string {
 	return truncateString(strings.TrimSpace(strings.ToValidUTF8(value, "")), opsErrorLogMaxUserAgentBytes)
+}
+
+// logOpsErrorEntry mirrors every persisted error entry to the application
+// log so failures (upstream errors, tool-call errors, validation errors)
+// are visible in docker logs without querying the ops tables. 5xx goes to
+// Error, everything else to Warn. The message is sanitized and bounded.
+func logOpsErrorEntry(entry *service.OpsInsertErrorLogInput) {
+	msg, _ := service.SanitizeOpsErrorBodyForQueue(entry.ErrorMessage)
+	fields := []zap.Field{
+		zap.String("request_id", entry.RequestID),
+		zap.String("platform", entry.Platform),
+		zap.String("model", entry.Model),
+		zap.String("path", entry.RequestPath),
+		zap.Int("status", entry.StatusCode),
+		zap.String("phase", entry.ErrorPhase),
+		zap.String("type", entry.ErrorType),
+		zap.Int("upstream_attempts", len(entry.UpstreamErrors)),
+		zap.String("message", msg),
+	}
+	if entry.AccountID != nil {
+		fields = append(fields, zap.Int64("account_id", *entry.AccountID))
+	}
+	if entry.UpstreamStatusCode != nil {
+		fields = append(fields, zap.Int("upstream_status", *entry.UpstreamStatusCode))
+	}
+	if entry.StatusCode >= 500 {
+		logger.L().Error("gateway request failed", fields...)
+		return
+	}
+	logger.L().Warn("gateway request failed", fields...)
 }
 
 func StopOpsErrorLogWorkers() bool {

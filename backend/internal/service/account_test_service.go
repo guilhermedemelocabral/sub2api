@@ -877,7 +877,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			}
 		}
 	} else {
-		req.Header.Set("Authorization", "Bearer "+authToken)
+		setOpenAIAPIKeyAuthHeader(req.Header, credentialAccount, authToken)
 	}
 
 	// Set OAuth-specific headers for ChatGPT internal API
@@ -2101,7 +2101,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+authToken)
+	setOpenAIAPIKeyAuthHeader(req.Header, account, authToken)
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
@@ -2216,7 +2216,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 			}
 		}
 	} else {
-		req.Header.Set("Authorization", "Bearer "+authToken)
+		setOpenAIAPIKeyAuthHeader(req.Header, credentialAccount, authToken)
 	}
 	applyOpenAICodexProbeHeaders(req.Header)
 	if isOAuth {
