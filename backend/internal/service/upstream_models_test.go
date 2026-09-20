@@ -237,6 +237,59 @@ func TestExtractGrokUpstreamModelIDs(t *testing.T) {
 	require.Equal(t, []string{"grok-4.5", "grok-build-0.1", "grok-composer-2.5-fast", "grok-meta", "grok-name", "grok-safe"}, models)
 }
 
+func TestExtractUpstreamModelCatalogPreservesLLMBoostModelCard(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"object":"list","data":[{
+		"id":"Qwen3.8-Flash-Next-vLLM",
+		"object":"model",
+		"owned_by":"s1-vllm",
+		"context_window":262144,
+		"max_output_tokens":262144,
+		"max_completion_tokens":262144,
+		"reasoning":true,
+		"reasoning_effort":"xhigh",
+		"reasoning_effort_options":["off","low","med","xhigh"],
+		"capabilities":["vision","thinking"],
+		"architecture":{"input_modalities":["text","image"]},
+		"llmboost":{"locality":"local","runtime_status":"available"}
+	}]}`)
+
+	models, metadata, err := extractUpstreamModelCatalog(body, false)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Qwen3.8-Flash-Next-vLLM"}, models)
+
+	card := metadata["Qwen3.8-Flash-Next-vLLM"]
+	require.True(t, *card.Reasoning)
+	require.Equal(t, int64(262144), card.ContextWindow)
+	require.Equal(t, int64(262144), card.MaxOutputTokens)
+	require.Equal(t, "xhigh", card.DefaultReasoningLevel)
+	require.Equal(t, []string{"off", "low", "med", "xhigh"}, card.SupportedReasoningLevels)
+	require.Contains(t, card.InputModalities, "text")
+	require.Contains(t, card.InputModalities, "image")
+	require.NotEmpty(t, card.Card)
+}
+
+func TestCompleteUpstreamMetadataKeepsRemoteLLMBoostCards(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"data":[{
+		"id":"betallm-glm53flash",
+		"owned_by":"betallm",
+		"context_window":262144,
+		"max_output_tokens":131072,
+		"llmboost":{"locality":"remote","runtime_status":"remote"}
+	}]}`)
+	_, metadata, err := extractUpstreamModelCatalog(body, false)
+	require.NoError(t, err)
+
+	kept := completeUpstreamModelMetadataSubset([]string{"betallm-glm53flash"}, metadata)
+	require.Contains(t, kept, "betallm-glm53flash")
+	require.Equal(t, int64(262144), kept["betallm-glm53flash"].ContextWindow)
+	require.Equal(t, int64(131072), kept["betallm-glm53flash"].MaxOutputTokens)
+	require.NotEmpty(t, kept["betallm-glm53flash"].Card)
+}
+
 func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	t.Parallel()
 

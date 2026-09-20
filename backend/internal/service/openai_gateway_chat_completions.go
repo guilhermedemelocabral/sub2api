@@ -74,7 +74,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	rememberOpenCodeInboundBody(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, gjson.GetBytes(body, "model").String()) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
 	setCodexToolNameReverse(c, nil)
@@ -185,8 +185,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	}
 
 	// 固定 chat_completions 的 CN 账号，以及强制或已探测确认不支持 Responses
-	// 的其他 APIKey 账号，均走 CC 直转。
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	// 的其他 APIKey 账号，均走 CC 直转。DeepSeek 非 V4/flash 模型同样回退
+	// 直转（原生 /responses 会拒绝这些模型）。
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, gjson.GetBytes(body, "model").String()) {
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
@@ -268,6 +269,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		// ChatCompletionsToResponses always sets Stream=true (upstream always streams).
 		responsesReq, err = apicompat.ChatCompletionsToResponses(&chatReq)
 		if err != nil {
+			appendRequestTranslationErrorEvent(c, account, upstreamModel, err)
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
 		responsesReq.Model = upstreamModel

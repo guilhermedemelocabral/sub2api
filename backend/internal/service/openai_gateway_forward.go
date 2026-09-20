@@ -21,7 +21,7 @@ import (
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, gjson.GetBytes(body, "model").String()) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
 	filteredBody, filterErr := filterOpenAIResponsesNoneReasoningEffortForAccount(account, body)
@@ -195,7 +195,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		originalModel = reqModel
 	}
 
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, reqModel) {
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
@@ -1352,14 +1352,73 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 		// Grok/GPT/Muse into Chat Completions.
 		return false
 	}
-	if account.IsCNProvider() {
-		// CN 的显式协议配置优先于异步探针 Extra；adaptive 仅 DeepSeek / Kimi
-		// 有原生 Responses，GLM 回退 Chat Completions。
+	if account.IsCNProvider() || account.IsGenericMultiProtocolAPIKey() {
+		// CN 的显式协议配置优先于异步探针 Extra；adaptive 下具备原生端点的
+		// 平台（DeepSeek / Kimi / MiniMax，见 SupportsNativeCNResponses）走
+		// 原生 Responses，其余（如 GLM）回退 Chat Completions。泛 OpenAI
+		// opt-in 账号同分支：adaptive 走探针，显式协议信任配置。
 		switch account.GetAPIProtocol() {
 		case APIProtocolChatCompletions:
 			return true
 		case APIProtocolAdaptive:
+			if account.IsGenericMultiProtocolAPIKey() {
+				return !openai_compat.ShouldUseResponsesAPI(account.Extra)
+			}
 			return !account.SupportsNativeCNResponses()
+		default:
+			return false
+		}
+	}
+	return !openai_compat.ShouldUseResponsesAPI(account.Extra)
+}
+
+// rawChatRoutingModel resolves the upstream model id used for protocol routing
+// decisions: account model mapping applied to the requested id. Mirrors
+// resolveOpenAIForwardModel without the messages-dispatch fallback, which CN
+// providers never use (sanitized to empty).
+func rawChatRoutingModel(account *Account, requestedModel string) string {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if account == nil {
+		return requestedModel
+	}
+	mapped, _ := account.ResolveMappedModel(requestedModel)
+	return mapped
+}
+
+// shouldForwardOpenAIResponsesViaRawChatCompletionsForModel is the model-aware
+// variant of shouldForwardOpenAIResponsesViaRawChatCompletions for request
+// paths where the requested model is known. Known chat-only DeepSeek ids
+// (deepseek-chat, deepseek-reasoner) bridge via Chat Completions even on
+// explicit-responses accounts, since the native endpoint would reject them
+// while Chat Completions serves every DeepSeek model. Unknown ids keep the
+// historical account-level routing.
+func shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account *Account, requestedModel string) bool {
+	if account == nil || account.Type != AccountTypeAPIKey {
+		return false
+	}
+	if account.IsOpenCodeGo() {
+		return false
+	}
+	if account.IsCNProvider() || account.IsGenericMultiProtocolAPIKey() {
+		switch account.GetAPIProtocol() {
+		case APIProtocolChatCompletions:
+			return true
+		case APIProtocolAdaptive:
+			if account.IsGenericMultiProtocolAPIKey() {
+				return !openai_compat.ShouldUseResponsesAPI(account.Extra)
+			}
+			if model := rawChatRoutingModel(account, requestedModel); model != "" {
+				return !account.SupportsNativeCNResponsesForModel(model)
+			}
+			// 模型未知（如 responses 子路径请求）：退回账号级能力判断。
+			return !account.SupportsNativeCNResponses()
+		case APIProtocolResponses:
+			if account.Platform == PlatformDeepseek {
+				if model := rawChatRoutingModel(account, requestedModel); model != "" {
+					return !DeepSeekModelSupportsNativeResponses(model)
+				}
+			}
+			return false
 		default:
 			return false
 		}

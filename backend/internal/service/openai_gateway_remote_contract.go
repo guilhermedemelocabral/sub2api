@@ -32,6 +32,12 @@ func remoteContractPlatform(account *Account) string {
 	if account == nil {
 		return ""
 	}
+	// Explicit config wins: Credentials["vendor_family"] ("stepfun",
+	// "betallm", ...). Legacy name-substring matching below stays as
+	// fallback for accounts configured before the field existed.
+	if family := strings.ToLower(strings.TrimSpace(account.GetCredential("vendor_family"))); family != "" {
+		return family
+	}
 	name := strings.ToLower(strings.TrimSpace(account.Name))
 	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
 	switch {

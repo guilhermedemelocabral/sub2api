@@ -543,3 +543,66 @@ func TestIsAnthropicFableModel(t *testing.T) {
 	require.False(t, isAnthropicFableModel("claude-sonnet-4-6"))
 	require.False(t, isAnthropicFableModel(""))
 }
+
+func TestAntigravityGeminiWeeklyLockAllowsReprobeAfterCooldown(t *testing.T) {
+	t.Setenv(antigravityGeminiReprobeSecondsEnv, "")
+	limitedAt := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	week := time.Now().Add(167 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"gemini-3.8-flash-high": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": week,
+				},
+				antigravityGeminiModelRateLimitKey: map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": week,
+				},
+			},
+		},
+	}
+
+	require.False(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-high"),
+		"stale weekly Gemini lock must not park the account after the re-probe cooldown")
+	require.Zero(t, account.GetRateLimitRemainingTimeWithContext(context.Background(), "gemini-3.8-flash-high"))
+}
+
+func TestAntigravityGeminiFreshLockStillBlocks(t *testing.T) {
+	t.Setenv(antigravityGeminiReprobeSecondsEnv, "")
+	limitedAt := time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339)
+	week := time.Now().Add(167 * time.Hour).UTC().Format(time.RFC3339)
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Extra: map[string]any{
+			modelRateLimitsKey: map[string]any{
+				"gemini-3.8-flash-high": map[string]any{
+					"rate_limited_at":     limitedAt,
+					"rate_limit_reset_at": week,
+				},
+			},
+		},
+	}
+
+	require.True(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-high"))
+	require.Greater(t, account.GetRateLimitRemainingTimeWithContext(context.Background(), "gemini-3.8-flash-high"), time.Duration(0))
+}
+
+func TestAntigravityModelRateLimitKeys_GeminiDoesNotIncludeFamily(t *testing.T) {
+	require.Equal(t, []string{"gemini-3.8-flash-high"}, antigravityModelRateLimitKeys("gemini-3.8-flash-high"))
+}
+
+func TestCapAntigravityGeminiRateLimitResetTruncatesWeek(t *testing.T) {
+	t.Setenv(antigravityGeminiReprobeSecondsEnv, "")
+	week := time.Now().Add(167 * time.Hour)
+	got := capAntigravityGeminiRateLimitReset("gemini-3.8-flash-high", week)
+	require.True(t, got.Before(time.Now().Add(2*time.Minute)), "weekly Gemini reset must be capped to the re-probe window")
+
+	short := time.Now().Add(20 * time.Second)
+	got = capAntigravityGeminiRateLimitReset("gemini-3.8-flash-high", short)
+	require.WithinDuration(t, short, got, time.Second)
+
+	got = capAntigravityGeminiRateLimitReset("claude-sonnet-4-5", week)
+	require.WithinDuration(t, week, got, time.Second)
+}

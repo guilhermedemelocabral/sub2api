@@ -286,7 +286,38 @@ func (a *Account) openCodeDefaultAnthropicBaseURL() string {
 }
 
 func (a *Account) IsMultiProtocolAPIKey() bool {
-	return a != nil && IsMultiProtocolAPIKeyProvider(a.Platform)
+	if a == nil {
+		return false
+	}
+	if IsMultiProtocolAPIKeyProvider(a.Platform) {
+		return true
+	}
+	return a.IsGenericMultiProtocolAPIKey()
+}
+
+// IsGenericMultiProtocolAPIKey reports opt-in multi-protocol routing for
+// OpenAI-platform API-key accounts: generic OpenAI-compatible upstreams
+// (e.g. StepFun) that natively serve chat completions, responses and/or
+// Anthropic messages. Opt-in is explicit — api_protocol credential set, or
+// per-protocol api_base_urls present — so plain OpenAI accounts, Azure-style
+// single-base accounts and every OAuth flavor never match.
+func (a *Account) IsGenericMultiProtocolAPIKey() bool {
+	if a == nil || a.Platform != PlatformOpenAI || a.Type != AccountTypeAPIKey {
+		return false
+	}
+	if strings.TrimSpace(a.GetCredential("api_protocol")) != "" {
+		return true
+	}
+	baseURLs, ok := a.Credentials["api_base_urls"].(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, v := range baseURLs {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // openCodeGoNativeProtocol 返回 OpenCode Go 实际上游协议。

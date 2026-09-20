@@ -892,8 +892,9 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 
 	success := false
 	for _, key := range keys {
-		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, resetAt, afterSmartRetry) {
-			s.updateAccountModelRateLimitInCache(ctx, account, key, resetAt)
+		keyReset := capAntigravityGeminiRateLimitReset(key, resetAt)
+		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, keyReset, afterSmartRetry) {
+			s.updateAccountModelRateLimitInCache(ctx, account, key, keyReset)
 			success = true
 		}
 	}

@@ -1013,6 +1013,18 @@ func (a *Account) GetExtraString(key string) string {
 	return ""
 }
 
+// ManagedCatalogSlug returns the explicit catalog slug for managed
+// OpenAI-compatible accounts (Extra["managed_slug"]), compacted the same way
+// as legacy name inference (lowercase, separators stripped). Empty when
+// unset — callers fall back to inferring from the account name.
+func (a *Account) ManagedCatalogSlug() string {
+	if a == nil {
+		return ""
+	}
+	slug := strings.ToLower(strings.TrimSpace(a.GetExtraString("managed_slug")))
+	return strings.NewReplacer("_", "", "-", "", " ", "").Replace(slug)
+}
+
 func (a *Account) GetClaudeUserID() string {
 	if v := strings.TrimSpace(a.GetExtraString("claude_user_id")); v != "" {
 		return v
@@ -1423,7 +1435,7 @@ func (a *Account) GetAPIProtocol() string {
 	case APIProtocolAnthropic:
 		return APIProtocolAnthropic
 	case APIProtocolResponses:
-		if a.SupportsNativeCNResponses() {
+		if a.SupportsNativeCNResponses() || a.IsGenericMultiProtocolAPIKey() {
 			return APIProtocolResponses
 		}
 	case APIProtocolChatCompletions:
@@ -1448,6 +1460,42 @@ func (a *Account) SupportsNativeCNResponses() bool {
 	default:
 		return false
 	}
+}
+
+// DeepSeekModelSupportsNativeResponses reports whether a DeepSeek model id is
+// served by the native /responses endpoint. Per DeepSeek docs only the
+// V4/flash family (deepseek-v4-flash, deepseek-v4-pro, deepseek-flash) is
+// served there; the older chat-only ids (deepseek-chat, deepseek-reasoner)
+// must bridge via Chat Completions, which every DeepSeek model supports.
+//
+// Matching is a conservative blacklist: unknown ids (custom aliases, future
+// models) keep the historical native routing, since DeepSeek keeps expanding
+// Responses coverage and Chat Completions cannot serve Responses-only inputs
+// (e.g. response subpaths) either. Matching is substring-based so provider
+// prefixes (deepseek/...) and client context suffixes ([1m]) do not affect
+// the decision.
+func DeepSeekModelSupportsNativeResponses(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return false
+	}
+	if strings.Contains(m, "deepseek-chat") || strings.Contains(m, "deepseek-reasoner") {
+		return false
+	}
+	return true
+}
+
+// SupportsNativeCNResponsesForModel is the model-aware variant of
+// SupportsNativeCNResponses. Only DeepSeek restricts native Responses by
+// model today; other platforms keep the account-level behavior.
+func (a *Account) SupportsNativeCNResponsesForModel(model string) bool {
+	if !a.SupportsNativeCNResponses() {
+		return false
+	}
+	if a.Platform == PlatformDeepseek {
+		return DeepSeekModelSupportsNativeResponses(model)
+	}
+	return true
 }
 
 // UsesNativeCNResponses 报告当前账号是否应按原生 Responses 协议转发
@@ -1538,6 +1586,18 @@ func (a *Account) IsAnthropicProtocol() bool {
 	return a.GetAPIProtocol() == APIProtocolAnthropic
 }
 
+// HasNativeAnthropicBase reports whether the account resolves a native
+// Anthropic upstream base. CN platforms always do (official defaults);
+// generic opt-in accounts only when explicitly configured. Adaptive routing
+// uses this to fall back to protocol translation instead of erroring when
+// no Anthropic base exists.
+func (a *Account) HasNativeAnthropicBase() bool {
+	if a == nil {
+		return false
+	}
+	return strings.TrimSpace(a.GetAnthropicProtocolBaseURL()) != ""
+}
+
 // GetAnthropicProtocolBaseURL 返回 Anthropic 协议账号的上游 base_url
 // （上游路径为 {base}/v1/messages）。优先取凭证 base_url，缺失时按
 // 供应商 × 接入模式返回默认端点。非 Anthropic 协议账号返回空串。
@@ -1598,6 +1658,13 @@ func (a *Account) GetOpenAIFormatBaseURL() string {
 		return DefaultMiniMaxBaseURL
 	case PlatformOpenCodeGo:
 		return a.openCodeDefaultChatBaseURL()
+	case PlatformOpenAI:
+		if baseURLs, ok := a.Credentials["api_base_urls"].(map[string]any); ok {
+			if baseURL, ok := baseURLs[APIProtocolChatCompletions].(string); ok && strings.TrimSpace(baseURL) != "" {
+				return strings.TrimSpace(baseURL)
+			}
+		}
+		return ""
 	default:
 		return a.GetOpenAIBaseURL()
 	}

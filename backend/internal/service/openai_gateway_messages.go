@@ -36,7 +36,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	rememberOpenCodeInboundBody(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, gjson.GetBytes(body, "model").String()) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
 	setCodexToolNameReverse(c, nil)
@@ -55,7 +55,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		default:
 			return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}
-	} else if account.IsAnthropicProtocol() || account.IsAdaptiveAPIProtocol() {
+	} else if account.IsAnthropicProtocol() || (account.IsAdaptiveAPIProtocol() && account.HasNativeAnthropicBase()) {
 		// 入口分流（国产供应商 Anthropic 协议）：上游为供应商原生 Anthropic 端点时，
 		// /v1/messages 请求零转换直通（仅模型名映射 + 少量 body 清洗），完整保留
 		// thinking / tool_use / cache 语义，适配 Claude Code 等原生客户端。
@@ -66,7 +66,8 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// 固定 chat_completions 的 CN 账号，以及不支持 Responses 的其他 APIKey
 	// 账号，均将 Messages 转为 CC；固定 responses 的 CN 账号不受探针旧值覆盖。
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	// DeepSeek 仅 V4/flash 家族走原生 Responses，其余模型同样回退 CC 直转。
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, gjson.GetBytes(body, "model").String()) {
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)

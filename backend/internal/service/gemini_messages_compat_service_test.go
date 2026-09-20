@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type geminiCompatHTTPUpstreamStub struct {
@@ -115,6 +117,94 @@ func TestGeminiForwardAsChatCompletions_OAuthRoutesToGeminiAndReturnsChatFormat(
 	require.Equal(t, float64(7), usage["prompt_tokens"])
 	require.Equal(t, float64(3), usage["completion_tokens"])
 	require.Equal(t, float64(10), usage["total_tokens"])
+}
+
+func TestGeminiForwardAsChatCompletions_OmittedMaxTokensStripsBridgeDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamBody := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello from gemini"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	httpStub := &geminiCompatHTTPUpstreamStub{
+		response: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+		},
+	}
+	svc := &GeminiMessagesCompatService{
+		tokenProvider: &GeminiTokenProvider{},
+		httpUpstream:  httpStub,
+		cfg:           &config.Config{},
+	}
+	account := &Account{
+		ID:       101,
+		Platform: PlatformGemini,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "ya29.test-token",
+			"project_id":   "project-1",
+		},
+		Concurrency: 1,
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.NotNil(t, httpStub.lastReq)
+	sentBody, err := io.ReadAll(httpStub.lastReq.Body)
+	require.NoError(t, err)
+	require.False(t, gjson.GetBytes(sentBody, "request.generationConfig.maxOutputTokens").Exists(),
+		"omitted client limit must not send the 8192 bridge default to native Gemini")
+}
+
+func TestGeminiForwardAsChatCompletions_ExplicitMaxTokensPreserved(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamBody := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello from gemini"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	httpStub := &geminiCompatHTTPUpstreamStub{
+		response: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+		},
+	}
+	svc := &GeminiMessagesCompatService{
+		tokenProvider: &GeminiTokenProvider{},
+		httpUpstream:  httpStub,
+		cfg:           &config.Config{},
+	}
+	account := &Account{
+		ID:       101,
+		Platform: PlatformGemini,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "ya29.test-token",
+			"project_id":   "project-1",
+		},
+		Concurrency: 1,
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.NotNil(t, httpStub.lastReq)
+	sentBody, err := io.ReadAll(httpStub.lastReq.Body)
+	require.NoError(t, err)
+	require.Equal(t, int64(4096), gjson.GetBytes(sentBody, "request.generationConfig.maxOutputTokens").Int(),
+		"explicit client limit must flow through untouched")
 }
 
 func TestGeminiForwardAsChatCompletions_StreamsOpenAIChunksFromGeminiSSE(t *testing.T) {
@@ -1157,4 +1247,86 @@ func parseAnthropicContentBlockEvents(t *testing.T, raw string) []anthropicConte
 		})
 	}
 	return events
+}
+
+// Hermes (Nous) Chat Completions omits max_tokens on OpenAI-compat gateways,
+// expecting the full Gemini output budget. The CC→Responses→Anthropic bridge
+// fills Anthropic's required max_tokens with 8192, but the Gemini ingress
+// layers must not forward that bridge default as the Gemini cap: Gemini 3.x
+// thinking tokens count against the same budget, so the visible answer would
+// hit MAX_TOKENS (or go blank when thinking consumes the whole budget).
+func TestHermesChatCompletionsOmittingMaxTokensSkipsBridgeDefault(t *testing.T) {
+	ccReq := &apicompat.ChatCompletionsRequest{
+		Model:    "gemini-3.8-flash",
+		Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	require.Nil(t, ccReq.MaxTokens)
+	require.Nil(t, ccReq.MaxCompletionTokens)
+
+	responsesReq, err := apicompat.ChatCompletionsToResponses(ccReq)
+	require.NoError(t, err)
+	require.Nil(t, responsesReq.MaxOutputTokens, "Hermes omit must stay unset through Responses")
+
+	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(responsesReq)
+	require.NoError(t, err)
+	require.Equal(t, 8192, anthropicReq.MaxTokens)
+
+	claudeBody, err := json.Marshal(anthropicReq)
+	require.NoError(t, err)
+	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
+	require.NoError(t, err)
+	require.Equal(t, int64(8192), gjson.GetBytes(geminiReq, "generationConfig.maxOutputTokens").Int())
+	require.False(t, gjson.GetBytes(geminiReq, "generationConfig.thinkingConfig").Exists(),
+		"thinkingConfig is not forwarded; the 8192 bridge default must be rewritten below")
+
+	// Native Gemini ingress strips the bridge default so the model default applies.
+	stripped := rewriteGeminiMaxOutputTokens(geminiReq, 0)
+	require.False(t, gjson.GetBytes(stripped, "generationConfig.maxOutputTokens").Exists(),
+		"native Gemini must not inherit the 8192 bridge default")
+
+	// Antigravity ingress replaces it with the path's full budget.
+	raised := rewriteGeminiMaxOutputTokens(geminiReq, antigravityCompatMaxTokens)
+	require.Equal(t, int64(antigravityCompatMaxTokens), gjson.GetBytes(raised, "generationConfig.maxOutputTokens").Int())
+}
+
+func TestRewriteGeminiMaxOutputTokens(t *testing.T) {
+	full := []byte(`{"contents":[],"generationConfig":{"maxOutputTokens":8192,"temperature":0.7}}`)
+
+	raised := rewriteGeminiMaxOutputTokens(full, 64000)
+	require.Equal(t, int64(64000), gjson.GetBytes(raised, "generationConfig.maxOutputTokens").Int())
+	require.Equal(t, 0.7, gjson.GetBytes(raised, "generationConfig.temperature").Float())
+
+	stripped := rewriteGeminiMaxOutputTokens(full, 0)
+	require.False(t, gjson.GetBytes(stripped, "generationConfig.maxOutputTokens").Exists())
+	require.Equal(t, 0.7, gjson.GetBytes(stripped, "generationConfig.temperature").Float(),
+		"stripping must preserve sibling generationConfig keys")
+
+	onlyCap := rewriteGeminiMaxOutputTokens([]byte(`{"contents":[],"generationConfig":{"maxOutputTokens":8192}}`), 0)
+	require.False(t, gjson.GetBytes(onlyCap, "generationConfig").Exists(),
+		"an emptied generationConfig must be dropped")
+
+	noConfig := []byte(`{"contents":[]}`)
+	require.False(t, gjson.GetBytes(rewriteGeminiMaxOutputTokens(noConfig, 0), "generationConfig").Exists())
+	created := rewriteGeminiMaxOutputTokens(noConfig, 64000)
+	require.Equal(t, int64(64000), gjson.GetBytes(created, "generationConfig.maxOutputTokens").Int())
+
+	invalid := []byte(`{broken`)
+	require.Equal(t, invalid, rewriteGeminiMaxOutputTokens(invalid, 64000),
+		"invalid JSON must pass through untouched")
+}
+
+func TestClientOmittedMaxTokensProvenance(t *testing.T) {
+	require.True(t, ccClientOmittedMaxTokens(nil))
+	require.True(t, ccClientOmittedMaxTokens(&apicompat.ChatCompletionsRequest{}))
+	zero := 0
+	require.True(t, ccClientOmittedMaxTokens(&apicompat.ChatCompletionsRequest{MaxTokens: &zero}))
+	negative := -5
+	require.True(t, ccClientOmittedMaxTokens(&apicompat.ChatCompletionsRequest{MaxCompletionTokens: &negative}))
+	eight := 8
+	require.False(t, ccClientOmittedMaxTokens(&apicompat.ChatCompletionsRequest{MaxTokens: &eight}))
+	require.False(t, ccClientOmittedMaxTokens(&apicompat.ChatCompletionsRequest{MaxCompletionTokens: &eight}))
+
+	require.True(t, responsesClientOmittedMaxTokens(nil))
+	require.True(t, responsesClientOmittedMaxTokens(&apicompat.ResponsesRequest{}))
+	require.False(t, responsesClientOmittedMaxTokens(&apicompat.ResponsesRequest{MaxOutputTokens: &eight}))
 }

@@ -1602,6 +1602,66 @@ func TestGatewayModels_OpenAIListPrefixesCollidingManagedIDs(t *testing.T) {
 	require.NotContains(t, ids, "gemini-prod/shared")
 }
 
+func TestGatewayModels_ExplicitManagedSlugBeatsNameInference(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(92)
+	h := newGatewayModelsHandlerForTest(
+		&gatewayModelsAccountRepoStub{
+			byGroup: map[int64][]service.Account{
+				groupID: {
+					{
+						ID:       11,
+						Name:     "stepfun",
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"shared": "shared"},
+						},
+					},
+					{
+						ID:       12,
+						Name:     "my remote box",
+						Platform: service.PlatformOpenAI,
+						Credentials: map[string]any{
+							"model_mapping": map[string]any{"shared": "shared"},
+						},
+						Extra: map[string]any{
+							"managed_slug": "Custom_Hub",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			ID:       groupID,
+			Platform: service.PlatformOpenAI,
+		},
+	})
+
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := make([]string, 0, len(got.Data))
+	for _, item := range got.Data {
+		id, _ := item["id"].(string)
+		ids = append(ids, id)
+	}
+
+	require.Contains(t, ids, "stepfun/shared")
+	require.Contains(t, ids, "customhub/shared")
+	require.NotContains(t, ids, "shared")
+}
+
 func TestInferManagedCatalogSlug(t *testing.T) {
 	require.Equal(t, "llmboost", inferManagedCatalogSlug("LLMBOOST Ryzen"))
 	require.Empty(t, inferManagedCatalogSlug("Google2"))

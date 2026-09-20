@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -228,7 +229,8 @@ func PrepareRemoteRequest(platform, model string, body map[string]any) map[strin
 	case "betallm":
 		applyBetaLLMThinkingOff(body)
 	case "step":
-		applyStepEffortFloor(body)
+		applyStepOfficialModel(body)
+		applyStepEffort(body)
 	}
 	clampRemoteMaxTokens(body)
 	return body
@@ -267,10 +269,78 @@ func applyBetaLLMThinkingOff(body map[string]any) {
 }
 
 func applyStepEffortFloor(body map[string]any) {
-	if !isRemoteEffortOff(body["reasoning_effort"]) {
-		return
+	applyStepEffort(body)
+}
+
+// Official Step Plan ids from
+// https://platform.stepfun.ai/docs/en/guides/models/step-5-preview
+// and https://platform.stepfun.ai/docs/en/step-plan/integrations/reasoning-api
+func officialStepModelID(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || strings.HasPrefix(s, "commandcode/") {
+		return ""
 	}
-	body["reasoning_effort"] = "low"
+	s = strings.TrimPrefix(s, "stepfun/")
+	s = strings.TrimPrefix(s, "stepfun-")
+	switch {
+	case s == "step-5" || s == "step5-preview" || strings.HasPrefix(s, "step-5-preview"):
+		return "step-5-preview"
+	case strings.HasPrefix(s, "step-3.7-flash"):
+		return "step-3.7-flash"
+	case strings.HasPrefix(s, "step-3.5-flash-2603"):
+		return "step-3.5-flash-2603"
+	case strings.HasPrefix(s, "step-3.5-flash"):
+		return "step-3.5-flash"
+	case strings.HasPrefix(s, "step-router-v1"):
+		return "step-router-v1"
+	default:
+		return ""
+	}
+}
+
+func applyStepOfficialModel(body map[string]any) {
+	raw, _ := body["model"].(string)
+	if official := officialStepModelID(raw); official != "" {
+		body["model"] = official
+	}
+}
+
+func stepEffortWire(raw any) string {
+	s := ""
+	if v, ok := raw.(string); ok {
+		s = strings.ToLower(strings.TrimSpace(v))
+	}
+	switch s {
+	case "low", "minimal", "off", "none":
+		return "low"
+	case "medium", "med":
+		return "medium"
+	case "high", "xhigh", "max", "on", "auto":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+// applyStepEffort maps client aliases onto the documented low|medium|high
+// ladder. Omitted or unknown effort becomes high (operator default).
+func applyStepEffort(body map[string]any) {
+	raw := body["reasoning_effort"]
+	if raw == nil {
+		if reasoning, ok := body["reasoning"].(map[string]any); ok {
+			raw = reasoning["effort"]
+		}
+	}
+	wire := stepEffortWire(raw)
+	if wire == "" {
+		wire = "high"
+	}
+	body["reasoning_effort"] = wire
+	if thinking, ok := body["thinking"].(map[string]any); ok {
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(thinking["type"])), "disabled") {
+			delete(body, "thinking")
+		}
+	}
 }
 
 func remoteNumericInt(v any) (int, bool) {

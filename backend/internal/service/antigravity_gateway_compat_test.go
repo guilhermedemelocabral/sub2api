@@ -257,7 +257,7 @@ func TestBuildAntigravityCompatGeminiBody_ConfiguresMixedToolInvocations(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			claudeBody := []byte(`{"messages":[{"role":"user","content":"hello"}],"tools":` + tt.tools + `}`)
 			claudeBody = bytes.ReplaceAll(claudeBody, []byte{92}, nil)
-			body, err := svc.buildAntigravityCompatGeminiBody(context.Background(), claudeBody, nil, "project-1", "gemini-2.5-flash")
+			body, err := svc.buildAntigravityCompatGeminiBody(context.Background(), claudeBody, nil, "project-1", "gemini-2.5-flash", false)
 			require.NoError(t, err)
 
 			var wrapped map[string]any
@@ -410,6 +410,49 @@ func TestAntigravityCompatPreservesChatTokenLimit(t *testing.T) {
 			require.NotNil(t, result)
 			require.Len(t, upstream.requestBodies, 1)
 			require.Equal(t, tt.want, gjson.GetBytes(upstream.requestBodies[0], "request.generationConfig.maxOutputTokens").Int())
+		})
+	}
+}
+
+func TestAntigravityCompatOmittedMaxTokensUsesFullBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name string
+		path string
+		body []byte
+		call func(*AntigravityGatewayService, context.Context, *gin.Context, *Account, []byte) (*ForwardResult, error)
+	}{
+		{
+			name: "chat completions omit",
+			path: "/v1/chat/completions",
+			body: []byte(`{"model":"gemini-3.1-pro-high","messages":[{"role":"user","content":"ok"}]}`),
+			call: func(svc *AntigravityGatewayService, ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
+				return svc.ForwardAsChatCompletions(ctx, c, account, body, nil)
+			},
+		},
+		{
+			name: "responses omit",
+			path: "/v1/responses",
+			body: []byte(`{"model":"gemini-3.1-pro-high","input":"ok"}`),
+			call: func(svc *AntigravityGatewayService, ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
+				return svc.ForwardAsResponses(ctx, c, account, body, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+			c, _ := newAntigravityCompatContext(http.MethodPost, tt.path, tt.body)
+
+			result, err := tt.call(svc, context.Background(), c, newAntigravityCompatAccount(AccountTypeOAuth), tt.body)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, upstream.requestBodies, 1)
+			require.Equal(t, int64(antigravityCompatMaxTokens), gjson.GetBytes(upstream.requestBodies[0], "request.generationConfig.maxOutputTokens").Int(),
+				"omitted client limit must use the full budget, not the 8192 bridge default")
 		})
 	}
 }

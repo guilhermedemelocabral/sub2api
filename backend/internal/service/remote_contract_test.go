@@ -202,6 +202,36 @@ func TestPrepareRemoteRequestStepfunOffMapsToLow(t *testing.T) {
 	}
 }
 
+func TestPrepareRemoteRequestStepfunAliasesOfficialModelAndEffort(t *testing.T) {
+	out := PrepareRemoteRequest("stepfun", "stepfun-step-5-preview", map[string]any{
+		"model":            "stepfun-step-5-preview",
+		"reasoning_effort": "xhigh",
+	})
+	if out["model"] != "step-5-preview" {
+		t.Fatalf("model=%#v", out["model"])
+	}
+	if out["reasoning_effort"] != "high" {
+		t.Fatalf("effort=%#v", out["reasoning_effort"])
+	}
+}
+
+func TestPrepareRemoteRequestStepfunDefaultEffortHigh(t *testing.T) {
+	out := PrepareRemoteRequest("stepfun", "step-5-preview", map[string]any{"model": "step-5-preview"})
+	if out["reasoning_effort"] != "high" {
+		t.Fatalf("default effort=%#v", out["reasoning_effort"])
+	}
+}
+
+func TestPrepareRemoteRequestStepfunReasoningEffortField(t *testing.T) {
+	out := PrepareRemoteRequest("stepfun", "step-5-preview", map[string]any{
+		"model":     "step-5-preview",
+		"reasoning": map[string]any{"effort": "med"},
+	})
+	if out["reasoning_effort"] != "medium" {
+		t.Fatalf("nested effort=%#v", out["reasoning_effort"])
+	}
+}
+
 func TestPrepareRemoteRequestClampsMaxTokensToContext(t *testing.T) {
 	messages := []any{map[string]any{"role": "user", "content": "hi"}}
 	promptJSON, err := json.Marshal(messages)

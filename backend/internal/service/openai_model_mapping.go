@@ -15,7 +15,9 @@ func resolveOpenAIForwardModel(account *Account, requestedModel, messagesDispatc
 	}
 
 	mappedModel, matched := account.ResolveMappedModel(requestedModel)
-	if !matched && messagesDispatchMappedModel != "" {
+	// 泛 OpenAI opt-in 账号：分组调度默认值是 openai 专属（gpt-5.x 等），
+	// 发给第三方上游必错；与 CN 账号同语义，只认账号级 model_mapping。
+	if !matched && messagesDispatchMappedModel != "" && !account.IsGenericMultiProtocolAPIKey() {
 		return messagesDispatchMappedModel
 	}
 	return mappedModel

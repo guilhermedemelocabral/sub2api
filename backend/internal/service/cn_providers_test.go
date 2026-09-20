@@ -655,6 +655,62 @@ func TestSupportsNativeCNResponses(t *testing.T) {
 	require.False(t, (&Account{Platform: PlatformOpenAI}).SupportsNativeCNResponses())
 }
 
+func TestDeepSeekModelSupportsNativeResponses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"deepseek-v4-flash", true},
+		{"deepseek-v4-pro", true},
+		{"deepseek-flash", true},
+		{"deepseek-v4.1-flash", true},
+		{"DeepSeek-V4-Flash", true},
+		{"deepseek/deepseek-v4-flash", true},
+		{"deepseek-flash[1m]", true},
+		{"deepseek-chat", false},
+		{"deepseek-reasoner", false},
+		{"deepseek-chat-v3", false},
+		{"claude-sonnet-4-6", true},
+		{"gpt-5.4", true},
+		{"some-future-model", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, DeepSeekModelSupportsNativeResponses(tc.model), "model %q", tc.model)
+	}
+}
+
+func TestShouldForwardResponsesViaRawChatCompletionsForModel(t *testing.T) {
+	t.Parallel()
+	mk := func(platform, protocol string) *Account {
+		return &Account{
+			Platform: platform, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"api_protocol": protocol},
+		}
+	}
+
+	deepseekAdaptive := mk(PlatformDeepseek, APIProtocolAdaptive)
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekAdaptive, "deepseek-v4-flash"))
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekAdaptive, "deepseek-chat"))
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekAdaptive, "deepseek-reasoner"))
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekAdaptive, ""), "未知模型退回账号级能力")
+
+	deepseekExplicit := mk(PlatformDeepseek, APIProtocolResponses)
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekExplicit, "deepseek-v4-pro"))
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(deepseekExplicit, "deepseek-chat"), "显式 responses 仍为旧模型回退 CC")
+
+	mapped := mk(PlatformDeepseek, APIProtocolAdaptive)
+	mapped.Credentials["model_mapping"] = map[string]any{"claude-sonnet": "deepseek-v4-flash"}
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(mapped, "claude-sonnet"), "按映射后模型判断")
+
+	kimiAdaptive := mk(PlatformKimi, APIProtocolAdaptive)
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(kimiAdaptive, "kimi-k2.6"))
+
+	zhipuAdaptive := mk(PlatformZhipu, APIProtocolAdaptive)
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(zhipuAdaptive, "glm-5"))
+}
+
 func TestAdaptiveProtocolBaseURLs(t *testing.T) {
 	t.Parallel()
 
@@ -870,7 +926,9 @@ func TestNormalizeDeepSeekResponsesRequestBody(t *testing.T) {
 }
 
 // TestGetAnthropicAPIKeyAuthScheme_CNProvider CN 账号可经 extra 覆写鉴权方案，
-// 默认保持 x-api-key。
+// 默认保持 x-api-key。注意：Kimi/Zhipu/MiniMax 官方指南要求 Bearer，
+// 应按账号显式配置 authorization_bearer（见 docs/PROVIDER_PROTOCOLS.md）；
+// 默认值未随厂商指南翻转，原因见 docs/GO_TOOLCHAIN_NOTES.md。
 func TestGetAnthropicAPIKeyAuthScheme_CNProvider(t *testing.T) {
 	t.Parallel()
 
@@ -882,4 +940,7 @@ func TestGetAnthropicAPIKeyAuthScheme_CNProvider(t *testing.T) {
 
 	zhipu.Extra = map[string]any{"anthropic_apikey_auth_scheme": "authorization_bearer"}
 	require.Equal(t, AnthropicAPIKeyAuthSchemeAuthorizationBearer, zhipu.GetAnthropicAPIKeyAuthScheme())
+
+	zhipu.Extra = map[string]any{"anthropic_apikey_auth_scheme": AnthropicAPIKeyAuthSchemeXAPIKey}
+	require.Equal(t, AnthropicAPIKeyAuthSchemeXAPIKey, zhipu.GetAnthropicAPIKeyAuthScheme())
 }

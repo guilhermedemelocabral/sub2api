@@ -47,12 +47,17 @@ type cnProtocolIngressCase struct {
 	forward func(*OpenAIGatewayService, *gin.Context, *Account, []byte) error
 }
 
+// cnProtocolIngressCases uses a responses-capable DeepSeek id: chat-only ids
+// (deepseek-chat, deepseek-reasoner) always bridge via Chat Completions,
+// even on explicit-responses accounts, so they cannot observe native
+// Responses routing (see TestDeepSeekModelSupportsNativeResponses and
+// TestFixedCNResponsesBridgesChatOnlyDeepSeekModels below).
 func cnProtocolIngressCases() []cnProtocolIngressCase {
 	return []cnProtocolIngressCase{
 		{
 			name: "chat completions",
 			path: "/v1/chat/completions",
-			body: []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":false}`),
+			body: []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"stream":false}`),
 			forward: func(svc *OpenAIGatewayService, c *gin.Context, account *Account, body []byte) error {
 				_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 				return err
@@ -61,7 +66,7 @@ func cnProtocolIngressCases() []cnProtocolIngressCase {
 		{
 			name: "messages",
 			path: "/v1/messages",
-			body: []byte(`{"model":"deepseek-chat","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`),
+			body: []byte(`{"model":"deepseek-v4-flash","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`),
 			forward: func(svc *OpenAIGatewayService, c *gin.Context, account *Account, body []byte) error {
 				_, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
 				return err
@@ -70,7 +75,7 @@ func cnProtocolIngressCases() []cnProtocolIngressCase {
 		{
 			name: "responses",
 			path: "/v1/responses",
-			body: []byte(`{"model":"deepseek-chat","input":"hello","stream":false}`),
+			body: []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`),
 			forward: func(svc *OpenAIGatewayService, c *gin.Context, account *Account, body []byte) error {
 				_, err := svc.Forward(context.Background(), c, account, body)
 				return err
@@ -261,6 +266,33 @@ func TestFixedCNResponsesProtocolOverridesStaleChatMode(t *testing.T) {
 
 			require.Error(t, err)
 			require.Equal(t, "http://responses.example/responses", upstream.lastReq.URL.String())
+		})
+	}
+}
+
+// TestFixedCNResponsesBridgesChatOnlyDeepSeekModels: explicit responses
+// protocol still bridges chat-only DeepSeek ids via Chat Completions,
+// because the native /responses endpoint would reject them.
+func TestFixedCNResponsesBridgesChatOnlyDeepSeekModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	bodies := map[string][]byte{
+		"chat completions": []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":false}`),
+		"messages":         []byte(`{"model":"deepseek-reasoner","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`),
+		"responses":        []byte(`{"model":"deepseek-chat","input":"hello","stream":false}`),
+	}
+	for _, tc := range cnProtocolIngressCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &httpUpstreamRecorder{err: errors.New("stop after capture")}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+			account := adaptiveProtocolTestAccount(PlatformDeepseek, nil)
+			account.Credentials["api_protocol"] = APIProtocolResponses
+			account.Credentials["base_url"] = "http://responses.example"
+
+			body := bodies[tc.name]
+			err := tc.forward(svc, adaptiveProtocolTestContext(tc.path, body), account, body)
+
+			require.Error(t, err)
+			require.Equal(t, "http://responses.example/v1/chat/completions", upstream.lastReq.URL.String())
 		})
 	}
 }

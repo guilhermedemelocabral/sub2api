@@ -1393,9 +1393,10 @@ func grokModelSupportsConfigurableReasoning(modelID string) bool {
 }
 
 type catalogEntry struct {
-	Slug       string
-	UpstreamID string
-	Platform   string
+	Slug         string
+	UpstreamID   string
+	Platform     string
+	SlugExplicit bool
 }
 
 func listedCatalogEntries(modelIDs []string) []catalogEntry {
@@ -1459,9 +1460,13 @@ func publicModelIDs(entries []catalogEntry) []string {
 			resolvedEntries = append(resolvedEntries, item)
 			continue
 		}
-		item.slug = inferManagedCatalogSlug(entry.Slug)
-		if item.slug == "" {
-			item.slug = inferManagedCatalogSlug(entry.Platform)
+		if entry.SlugExplicit {
+			item.slug = entry.Slug
+		} else {
+			item.slug = inferManagedCatalogSlug(entry.Slug)
+			if item.slug == "" {
+				item.slug = inferManagedCatalogSlug(entry.Platform)
+			}
 		}
 		if !strings.Contains(id, "/") {
 			counts[id]++
@@ -1538,15 +1543,20 @@ func (h *GatewayHandler) managedCatalogEntries(ctx context.Context, groupID *int
 		if listingPlatform == service.PlatformOpenAI && account.Platform != service.PlatformOpenAI {
 			continue
 		}
-		slug := inferManagedCatalogSlug(account.Name)
+		slug := account.ManagedCatalogSlug()
+		slugExplicit := slug != ""
+		if slug == "" {
+			slug = inferManagedCatalogSlug(account.Name)
+		}
 		if slug == "" {
 			slug = inferManagedCatalogSlug(account.Platform)
 		}
 		for _, modelID := range advertisedManagedModelIDs(account) {
 			entries = append(entries, catalogEntry{
-				Slug:       slug,
-				UpstreamID: modelID,
-				Platform:   account.Platform,
+				Slug:         slug,
+				UpstreamID:   modelID,
+				Platform:     account.Platform,
+				SlugExplicit: slugExplicit,
 			})
 		}
 	}

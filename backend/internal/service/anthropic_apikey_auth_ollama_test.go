@@ -147,12 +147,14 @@ func TestSetAnthropicAPIKeyAuthHeader_OllamaCloudForcesBearer(t *testing.T) {
 // 才是判定依据，Chat Completions 地址（GetOpenAIBaseURL 选到的 CC base）不参与。
 func TestSetAnthropicAPIKeyAuthHeader_CNAdaptiveBaseURL(t *testing.T) {
 	// adaptive：anthropic 分协议地址指向 ollama.com → Bearer；CC 地址同挂 ollama
-	// 不影响（判定只用 anthropic 分协议地址）。
+	// 不影响（判定只用 anthropic 分协议地址）。显式 x-api-key 覆写仍被 Ollama
+	// 强制 Bearer 覆盖，证明走的是 base 判定而非平台默认。
 	adaptiveOllamaAnthropic := &Account{
 		ID:       902,
 		Name:     "adaptive-ollama-anthropic",
 		Platform: PlatformKimi,
 		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"anthropic_apikey_auth_scheme": AnthropicAPIKeyAuthSchemeXAPIKey},
 		Credentials: map[string]any{
 			"api_key":      "kimi-key",
 			"api_protocol": APIProtocolAdaptive,
@@ -198,6 +200,7 @@ func TestSetAnthropicAPIKeyAuthHeader_CNAdaptiveBaseURL(t *testing.T) {
 		Name:     "anthropic-protocol-ollama",
 		Platform: PlatformKimi,
 		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"anthropic_apikey_auth_scheme": AnthropicAPIKeyAuthSchemeXAPIKey},
 		Credentials: map[string]any{
 			"api_key":      "kimi-key",
 			"api_protocol": APIProtocolAnthropic,
@@ -307,6 +310,7 @@ func TestOpenAIGatewayService_NativeAnthropicBridge_OllamaCloudBearer(t *testing
 		Name:     "anthropic-protocol-ollama-bridge",
 		Platform: PlatformKimi,
 		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"anthropic_apikey_auth_scheme": AnthropicAPIKeyAuthSchemeXAPIKey},
 		Credentials: map[string]any{
 			"api_key":      "ollama-cloud-key",
 			"api_protocol": APIProtocolAnthropic,
@@ -324,7 +328,7 @@ func TestOpenAIGatewayService_NativeAnthropicBridge_OllamaCloudBearer(t *testing
 	require.Equal(t, "Bearer ollama-cloud-key", req.Header.Get("Authorization"))
 	require.Empty(t, req.Header.Get("x-api-key"))
 
-	// 非 Ollama 上游：保持 x-api-key，无 Authorization。
+	// 非 Ollama 上游：显式 x-api-key 覆写生效（与默认一致，不断言平台默认）。
 	account.Credentials["base_url"] = "https://api.moonshot.cn/anthropic"
 	targetURL, err = svc.nativeAnthropicTargetURL(account)
 	require.NoError(t, err)
