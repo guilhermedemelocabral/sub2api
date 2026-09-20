@@ -1413,20 +1413,19 @@ func listedCatalogEntries(modelIDs []string) []catalogEntry {
 func inferManagedCatalogSlug(raw string) string {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
-	switch normalized {
-	case "minimax":
-		return "minimax"
-	case "commandcode":
-		return "commandcode"
-	case "betallm":
-		return "betallm"
-	case "stepfun":
-		return "stepfun"
-	case "llmboost":
-		return "llmboost"
-	default:
+	if normalized == "" {
 		return ""
 	}
+	slugs := []string{"commandcode", "llmboost", "minimax", "betallm", "stepfun"}
+	matched := ""
+	for _, slug := range slugs {
+		if normalized == slug || strings.Contains(normalized, slug) {
+			if len(slug) > len(matched) {
+				matched = slug
+			}
+		}
+	}
+	return matched
 }
 
 func keepBarePublicModelID(entry catalogEntry, modelID string) bool {

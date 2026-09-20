@@ -1511,7 +1511,6 @@ func TestPublicModelIDs_SkipsUnknownSlugAndExistingPrefix(t *testing.T) {
 	require.Equal(t, []string{"shared", "shared", "minimax/already", "minimax/already"}, got)
 }
 
-
 func TestGatewayModels_OpenAIListPrefixesCollidingManagedIDs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1601,4 +1600,10 @@ func TestGatewayModels_OpenAIListPrefixesCollidingManagedIDs(t *testing.T) {
 	require.NotContains(t, ids, "shared")
 	require.NotContains(t, ids, "gemini/shared")
 	require.NotContains(t, ids, "gemini-prod/shared")
+}
+
+func TestInferManagedCatalogSlug(t *testing.T) {
+	require.Equal(t, "llmboost", inferManagedCatalogSlug("LLMBOOST Ryzen"))
+	require.Empty(t, inferManagedCatalogSlug("Google2"))
+	require.Empty(t, inferManagedCatalogSlug("antigravity"))
 }
