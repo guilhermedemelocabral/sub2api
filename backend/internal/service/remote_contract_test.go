@@ -140,6 +140,47 @@ func TestFinishLengthLoopCapsAtThree(t *testing.T) {
 	}
 }
 
+func TestPrepareRemoteRequestStepFlattensTextBlocks(t *testing.T) {
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": []any{
+			map[string]any{"type": "text", "text": "You are helpful."},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "Hello "},
+			map[string]any{"type": "input_text", "text": "world"},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "describe"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "http://x/y.png"}},
+		}},
+		map[string]any{"role": "assistant", "content": "plain stays"},
+	}}
+	out := PrepareRemoteRequest("stepfun", "step-5-preview", body)
+	messages := out["messages"].([]any)
+	if got := messages[0].(map[string]any)["content"]; got != "You are helpful." {
+		t.Fatalf("system content=%#v", got)
+	}
+	if got := messages[1].(map[string]any)["content"]; got != "Hello world" {
+		t.Fatalf("user content=%#v", got)
+	}
+	if _, ok := messages[2].(map[string]any)["content"].([]any); !ok {
+		t.Fatal("mixed image content must keep array form")
+	}
+	if got := messages[3].(map[string]any)["content"]; got != "plain stays" {
+		t.Fatalf("string content=%#v", got)
+	}
+
+	untouched := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "x"},
+		}},
+	}}
+	out = PrepareRemoteRequest("betallm", "glm", untouched)
+	if _, ok := out["messages"].([]any)[0].(map[string]any)["content"].([]any); !ok {
+		t.Fatal("non-step platforms must not flatten content")
+	}
+}
+
 func TestShouldContinueCompletionDecisionTable(t *testing.T) {
 	tests := []struct {
 		name         string

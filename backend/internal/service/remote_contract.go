@@ -299,9 +299,50 @@ func PrepareRemoteRequest(platform, model string, body map[string]any) map[strin
 	case "step":
 		applyStepOfficialModel(body)
 		applyStepEffort(body)
+		flattenStepTextContent(body)
 	}
 	clampRemoteMaxTokens(body)
 	return body
+}
+
+// flattenStepTextContent collapses text-only content blocks into a plain
+// string. Step's prefill validator rejects array content ("Input should be a
+// valid string"), which breaks harnesses that always send blocks. Messages
+// with non-text parts (images) are left untouched.
+func flattenStepTextContent(body map[string]any) {
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		texts := make([]string, 0, len(parts))
+		textOnly := true
+		for _, part := range parts {
+			block, ok := part.(map[string]any)
+			if !ok {
+				textOnly = false
+				break
+			}
+			blockType, _ := block["type"].(string)
+			if blockType != "text" && blockType != "input_text" {
+				textOnly = false
+				break
+			}
+			text, _ := block["text"].(string)
+			texts = append(texts, text)
+		}
+		if textOnly {
+			message["content"] = strings.Join(texts, "")
+		}
+	}
 }
 
 func remoteVendorFamily(platform string) string {
