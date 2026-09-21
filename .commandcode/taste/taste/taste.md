@@ -1,0 +1,7 @@
+# Taste
+- Prefers resilient account-pool failover: on 429/503/rate-limit, exhaust all available accounts in the pool with retries before surfacing 503/no-available-accounts, not failing after a single account; expects fixes to be documented as resilient. Confidence: 0.90
+- For large Go backend refactors/platform removals, prefers thorough deletion over stubs: remove wire bindings, routes, repo interface methods, billing price cards, model helpers and switch cases, treat leftover DB platform values as unsupported without crashing, preserve historical SQL migrations, do not reintroduce removed constants, keep other providers working. Confidence: 0.85
+- Requires verification after backend changes with `go build ./...` and focused `go test ./internal/domain ./internal/service` and a structured return listing files edited, build/test results, intentionally kept references, and risks; prefers matching existing code style with no drive-by refactors. Confidence: 0.85
+- Prefers brief, concise task-result summaries and no explicit "no follow-ups needed" filler when none are needed. Confidence: 0.75
+- Primarily communicates in Portuguese (pt-BR, UTC-3) about sub2api/Antigravity/Gemini pools, expects investigation of timeouts/rate-limits with quota/health visibility per account and curated minimal model lists with explicit account priority. Confidence: 0.80
+- Wants parser/LLM integration to avoid leaking thinking/reasoning traces as visible response. Confidence: 0.70
