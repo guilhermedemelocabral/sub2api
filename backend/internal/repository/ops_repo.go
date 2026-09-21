@@ -37,6 +37,7 @@ INSERT INTO ops_error_logs (
   user_agent,
   error_phase,
   error_type,
+  triage_class,
   severity,
   status_code,
   is_business_limited,
@@ -57,7 +58,7 @@ INSERT INTO ops_error_logs (
   created_at,
   api_key_prefix
 ) VALUES (
-  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39
 )`
 
 func NewOpsRepository(db *sql.DB) service.OpsRepository {
@@ -127,6 +128,14 @@ func (r *opsRepository) BatchInsertErrorLogs(ctx context.Context, inputs []*serv
 	return inserted, nil
 }
 
+// opsTriageClass defaults empty classes so rows are always filterable.
+func opsTriageClass(class string) string {
+	if strings.TrimSpace(class) == "" {
+		return service.TriageUnclassified
+	}
+	return class
+}
+
 func opsInsertErrorLogArgs(input *service.OpsInsertErrorLogInput) []any {
 	return []any{
 		opsNullString(input.RequestID),
@@ -148,6 +157,7 @@ func opsInsertErrorLogArgs(input *service.OpsInsertErrorLogInput) []any {
 		opsNullString(input.UserAgent),
 		input.ErrorPhase,
 		input.ErrorType,
+		opsTriageClass(input.TriageClass),
 		opsNullString(input.Severity),
 		opsNullInt(input.StatusCode),
 		input.IsBusinessLimited,
@@ -237,6 +247,7 @@ SELECT
   e.created_at,
   e.error_phase,
   e.error_type,
+  COALESCE(e.triage_class, 'unclassified'),
   COALESCE(e.error_owner, ''),
   COALESCE(e.error_source, ''),
   e.severity,
@@ -307,6 +318,7 @@ LIMIT $` + itoa(len(args)+1) + ` OFFSET $` + itoa(len(args)+2)
 			&item.CreatedAt,
 			&item.Phase,
 			&item.Type,
+			&item.TriageClass,
 			&item.Owner,
 			&item.Source,
 			&item.Severity,
@@ -408,6 +420,7 @@ SELECT
   e.created_at,
   e.error_phase,
   e.error_type,
+  COALESCE(e.triage_class, 'unclassified'),
   COALESCE(e.error_owner, ''),
   COALESCE(e.error_source, ''),
   e.severity,
@@ -482,6 +495,7 @@ LIMIT 1`
 		&out.CreatedAt,
 		&out.Phase,
 		&out.Type,
+		&out.TriageClass,
 		&out.Owner,
 		&out.Source,
 		&out.Severity,
@@ -930,6 +944,10 @@ func buildOpsErrorLogsWhere(filter *service.OpsErrorLogFilter) (string, []any) {
 	if p := strings.TrimSpace(filter.Platform); p != "" {
 		args = append(args, p)
 		clauses = append(clauses, "e.platform = $"+itoa(len(args)))
+	}
+	if t := strings.TrimSpace(strings.ToLower(filter.TriageClass)); t != "" {
+		args = append(args, t)
+		clauses = append(clauses, "LOWER(COALESCE(e.triage_class, 'unclassified')) = $"+itoa(len(args)))
 	}
 	if filter.GroupID != nil && *filter.GroupID > 0 {
 		args = append(args, *filter.GroupID)

@@ -33,6 +33,9 @@ type OpsErrorLog struct {
 	Phase string `json:"phase"`
 	Type  string `json:"type"`
 
+	// TriageClass is the in-gateway error triage ("JEV inside").
+	TriageClass string `json:"triage_class"`
+
 	Owner  string `json:"error_owner"`
 	Source string `json:"error_source"`
 
@@ -114,6 +117,7 @@ type OpsErrorLogFilter struct {
 	Phase            string // Recovered provider rows bypass status>=400 only with the explicit opt-in below.
 	Owner            string
 	Source           string
+	TriageClass      string
 	Resolved         *bool
 	Query            string
 	UserQuery        string // Search by user email

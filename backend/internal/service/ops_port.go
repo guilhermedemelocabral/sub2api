@@ -94,6 +94,9 @@ type OpsInsertErrorLogInput struct {
 	StatusCode        int
 	IsBusinessLimited bool
 	IsCountTokens     bool // 是否为 count_tokens 请求
+	// TriageClass is the in-gateway error triage ("JEV inside"), computed by
+	// ClassifyErrorTriage. Empty means unclassified.
+	TriageClass string
 
 	ErrorMessage string
 	ErrorBody    string

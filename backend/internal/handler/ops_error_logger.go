@@ -214,6 +214,19 @@ func enqueueOpsErrorLog(ops *service.OpsService, entry *service.OpsInsertErrorLo
 	if ops == nil || entry == nil {
 		return
 	}
+	if entry.TriageClass == "" {
+		upstreamStatus, upstreamMsg := 0, ""
+		if entry.UpstreamStatusCode != nil {
+			upstreamStatus = *entry.UpstreamStatusCode
+		}
+		if entry.UpstreamErrorMessage != nil {
+			upstreamMsg = *entry.UpstreamErrorMessage
+		}
+		entry.TriageClass = service.ClassifyErrorTriage(
+			entry.ErrorPhase, entry.ErrorType, entry.StatusCode,
+			upstreamStatus, entry.ErrorMessage, upstreamMsg,
+		)
+	}
 	logOpsErrorEntry(entry)
 	entry.UserAgent = normalizeOpsPersistentUserAgent(entry.UserAgent)
 	if entry.ErrorBody != "" {
@@ -286,6 +299,7 @@ func logOpsErrorEntry(entry *service.OpsInsertErrorLogInput) {
 		zap.Int("status", entry.StatusCode),
 		zap.String("phase", entry.ErrorPhase),
 		zap.String("type", entry.ErrorType),
+		zap.String("triage", entry.TriageClass),
 		zap.Int("upstream_attempts", len(entry.UpstreamErrors)),
 		zap.String("message", msg),
 	}
