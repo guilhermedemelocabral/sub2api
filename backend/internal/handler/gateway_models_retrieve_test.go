@@ -70,6 +70,36 @@ func TestRetrieveModelMatchesVisibleCatalogue(t *testing.T) {
 	}
 }
 
+func TestRetrieveHiddenAliasServesCanonicalCard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &service.Group{ID: 73, Platform: service.PlatformOpenAI}
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{byGroup: map[int64][]service.Account{
+		group.ID: {{
+			ID: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+			Status: service.StatusActive, Schedulable: true,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"step-5-preview":         "step-5-preview",
+				"stepfun-step-5-preview": "step-5-preview",
+			}},
+		}},
+	}})
+	list := requestModelForTest(h, group, "", "")
+	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
+	require.NotContains(t, list.Body.String(), "stepfun-step-5-preview")
+
+	got := requestModelForTest(h, group, "stepfun-step-5-preview", "")
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	var card struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(got.Body.Bytes(), &card))
+	require.Equal(t, "stepfun-step-5-preview", card.ID)
+
+	group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"step-5-preview"}}
+	blocked := requestModelForTest(h, group, "stepfun-step-5-preview", "")
+	require.Equal(t, http.StatusNotFound, blocked.Code, blocked.Body.String())
+}
+
 func TestRetrievePinnedModelPreservesMetadataFilteringAndErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

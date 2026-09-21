@@ -104,6 +104,8 @@ var (
 	modelsListCacheHitTotal   atomic.Int64
 	modelsListCacheMissTotal  atomic.Int64
 	modelsListCacheStoreTotal atomic.Int64
+	modelsListLivePruneTotal  atomic.Int64
+	modelsListDedupeHideTotal atomic.Int64
 
 	// Deprecated: flusher_enabled=true 后不再增长(仅 flag=false 降级直写路径使用);新主路径见 FlusherMetrics。remove after 2026-09。
 	// userPlatformQuotaDBIncrErrorTotal 统计 finalizePostUsageBilling 异步 goroutine
@@ -1430,7 +1432,16 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		mapping := acc.GetModelMapping()
 		if len(mapping) > 0 {
 			hasAnyMapping = true
+			live := liveCatalogModelSetForAccount(getModelsListCatalogReader(), acc.ID)
+			survivors := make([]string, 0, len(mapping))
 			for model := range mapping {
+				if live != nil && !liveCatalogKeepsModel(&acc, model, live) {
+					modelsListLivePruneTotal.Add(1)
+					continue
+				}
+				survivors = append(survivors, model)
+			}
+			for _, model := range dedupeTransparentRenames(&acc, survivors) {
 				modelSet[model] = struct{}{}
 			}
 		}
@@ -1461,6 +1472,182 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		modelsListCacheStoreTotal.Add(1)
 	}
 	return cloneStringSlice(models)
+}
+
+// liveCatalogModelSetForAccount returns the fresh live model set for pruning,
+// or nil to fail open (no reader, no fresh catalog: keep static mapping).
+func liveCatalogModelSetForAccount(reader LiveCatalogReader, accountID int64) map[string]struct{} {
+	if reader == nil {
+		return nil
+	}
+	models, ok := reader.FreshCatalogModels(accountID)
+	if !ok {
+		return nil
+	}
+	live := make(map[string]struct{}, len(models))
+	for _, id := range models {
+		if id = strings.TrimSpace(id); id != "" {
+			live[id] = struct{}{}
+		}
+	}
+	return live
+}
+
+// liveCatalogKeepsModel reports whether a mapping key survives live pruning:
+// its resolved upstream target must still be served. Unmatched keys and
+// wildcard targets fail open (kept) since absence cannot be proven.
+func liveCatalogKeepsModel(account *Account, model string, live map[string]struct{}) bool {
+	target, matched := account.ResolveMappedModel(model)
+	if !matched || strings.Contains(target, "*") {
+		return true
+	}
+	_, ok := live[strings.TrimSpace(target)]
+	return ok
+}
+
+// dedupeTransparentRenames collapses listing-only duplicates: mapping keys on
+// the same account that resolve to the same upstream target AND are a
+// transparent rename of it (same slug modulo vendor prefix, case and
+// separators) are served as one slug. Keys that carry behavior beyond the
+// target (gemini-3.8-flash vs gemini-3.8-flash-high) never collapse, and
+// routing still accepts every hidden alias: this only trims the served list.
+func dedupeTransparentRenames(account *Account, models []string) []string {
+	byTarget := groupKeysByResolvedTarget(account, models)
+	out := make([]string, 0, len(models))
+	for target, keys := range byTarget {
+		if len(keys) < 2 {
+			out = append(out, keys...)
+			continue
+		}
+		transparent, opaque := splitTransparentRenames(keys, target)
+		out = append(out, opaque...)
+		if len(transparent) == 0 {
+			continue
+		}
+		out = append(out, canonicalTransparentRename(transparent, target))
+		modelsListDedupeHideTotal.Add(int64(len(transparent) - 1))
+	}
+	return out
+}
+
+func groupKeysByResolvedTarget(account *Account, models []string) map[string][]string {
+	byTarget := make(map[string][]string)
+	for _, model := range models {
+		target, _ := account.ResolveMappedModel(model)
+		target = strings.TrimSpace(target)
+		byTarget[target] = append(byTarget[target], model)
+	}
+	return byTarget
+}
+
+// ResolveCanonicalListedModel maps a routable-but-delisted alias (hidden by
+// transparent-rename dedupe) to the served slug carrying its card. It reports
+// false for unknown ids and for pruned (dead-target) keys so retrieve keeps
+// 404ing exactly when the id could not be listed.
+func (s *GatewayService) ResolveCanonicalListedModel(ctx context.Context, groupID *int64, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	if s == nil || s.accountRepo == nil || model == "" {
+		return "", false
+	}
+	var accounts []Account
+	var err error
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil {
+		return "", false
+	}
+	for i := range accounts {
+		acc := &accounts[i]
+		mapping := acc.GetModelMapping()
+		if len(mapping) == 0 {
+			continue
+		}
+		target, matched := acc.ResolveMappedModel(model)
+		if !matched {
+			continue
+		}
+		target = strings.TrimSpace(target)
+		if strings.Contains(target, "*") {
+			return model, true
+		}
+		live := liveCatalogModelSetForAccount(getModelsListCatalogReader(), acc.ID)
+		if live != nil {
+			if _, ok := live[target]; !ok {
+				continue
+			}
+		}
+		keys := make([]string, 0, len(mapping))
+		for key := range mapping {
+			keys = append(keys, key)
+		}
+		for t, group := range groupKeysByResolvedTarget(acc, keys) {
+			if t != target {
+				continue
+			}
+			transparent, _ := splitTransparentRenames(group, t)
+			inTransparent := false
+			for _, key := range transparent {
+				if key == model {
+					inTransparent = true
+					break
+				}
+			}
+			if !inTransparent {
+				return model, true
+			}
+			return canonicalTransparentRename(transparent, t), true
+		}
+	}
+	return "", false
+}
+
+func splitTransparentRenames(keys []string, target string) (transparent, opaque []string) {
+	want := normalizeModelSlugForDedupe(target)
+	for _, key := range keys {
+		got := normalizeModelSlugForDedupe(key)
+		// Transparent when the key IS the target or carries it with a
+		// vendor tag ("stepfun-step-5-preview", "betallm-glm53flash").
+		// The reverse (short alias of a longer target) stays listed.
+		if got == want || strings.HasSuffix(got, want) {
+			transparent = append(transparent, key)
+			continue
+		}
+		opaque = append(opaque, key)
+	}
+	return transparent, opaque
+}
+
+// canonicalTransparentRename picks the single served slug: exact identity
+// first, then shortest, then lexicographic.
+func canonicalTransparentRename(keys []string, target string) string {
+	best := keys[0]
+	for _, key := range keys[1:] {
+		switch {
+		case key == target && best != target:
+			best = key
+		case (key == target) == (best == target):
+			if len(key) < len(best) || (len(key) == len(best) && key < best) {
+				best = key
+			}
+		}
+	}
+	return best
+}
+
+// normalizeModelSlugForDedupe lowercases and drops separators so pure
+// renames compare equal to their target.
+func normalizeModelSlugForDedupe(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '.', '-', '_', '/':
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (s *GatewayService) ListSchedulableAccounts(ctx context.Context, groupID *int64) []Account {

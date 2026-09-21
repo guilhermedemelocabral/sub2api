@@ -649,6 +649,171 @@ func TestGetAvailableModels_ErrorAndGlobalListBranches(t *testing.T) {
 	require.Equal(t, int64(1), okRepo.listAllCalls.Load())
 }
 
+type liveCatalogReaderStub struct {
+	catalogs map[int64][]string
+}
+
+func (s *liveCatalogReaderStub) FreshCatalogModels(accountID int64) ([]string, bool) {
+	models, ok := s.catalogs[accountID]
+	return models, ok
+}
+
+// TestGetAvailableModels_PruneByLiveCatalog is intentionally not parallel:
+// it installs the process-wide live catalog reader.
+func TestGetAvailableModels_PruneByLiveCatalog(t *testing.T) {
+	SetModelsListCatalogReader(&liveCatalogReaderStub{catalogs: map[int64][]string{
+		918273: {"live-target", "shared-target"},
+	}})
+	t.Cleanup(func() { SetModelsListCatalogReader(nil) })
+
+	repo := &modelsListAccountRepoStub{all: []Account{
+		{
+			ID:       918273,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"pub-alive": "live-target",
+				"pub-dead":  "gone-target",
+				"pub-alias": "shared-target",
+				"pub-wild":  "prefix-*",
+			}},
+		},
+		{
+			ID:          918274,
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{"other": "whatever"}},
+		},
+	}}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+	models := svc.GetAvailableModels(context.Background(), nil, PlatformOpenAI)
+	require.Equal(t, []string{"other", "pub-alias", "pub-alive", "pub-wild"}, models)
+}
+
+func TestGetAvailableModels_DedupeTransparentRenames(t *testing.T) {
+	SetModelsListCatalogReader(nil)
+	repo := &modelsListAccountRepoStub{all: []Account{
+		{
+			ID:       918280,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"step-5-preview":         "step-5-preview",
+				"stepfun-step-5-preview": "step-5-preview",
+				"stepfun/step-5-preview": "step-5-preview",
+			}},
+		},
+		{
+			ID:       918281,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"glm-5.3-flash":      "glm-5.3-flash",
+				"betallm-glm53flash": "glm-5.3-flash",
+			}},
+		},
+		{
+			ID:       918282,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"gemini-3.8-flash":        "gemini-3.8-flash-high",
+				"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
+				"gemini-3.8-flash-tiered": "gemini-3.8-flash-high",
+			}},
+		},
+	}}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+	models := svc.GetAvailableModels(context.Background(), nil, PlatformOpenAI)
+	// Step collapses 3 synonyms into the identity slug; the Flatt pair
+	// collapses into the bare id; the Gemini behavioral variants stay.
+	require.Equal(t, []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-tiered",
+		"glm-5.3-flash",
+		"step-5-preview",
+	}, models)
+}
+
+func TestResolveCanonicalListedModel(t *testing.T) {
+	SetModelsListCatalogReader(nil)
+	repo := &modelsListAccountRepoStub{all: []Account{
+		{
+			ID:       918290,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{
+				"step-5-preview":         "step-5-preview",
+				"stepfun-step-5-preview": "step-5-preview",
+				"stepfun/step-5-preview": "step-5-preview",
+			}},
+		},
+	}}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+	for _, alias := range []string{"stepfun-step-5-preview", "stepfun/step-5-preview"} {
+		got, ok := svc.ResolveCanonicalListedModel(context.Background(), nil, alias)
+		require.True(t, ok, alias)
+		require.Equal(t, "step-5-preview", got)
+	}
+	got, ok := svc.ResolveCanonicalListedModel(context.Background(), nil, "step-5-preview")
+	require.True(t, ok)
+	require.Equal(t, "step-5-preview", got)
+	_, ok = svc.ResolveCanonicalListedModel(context.Background(), nil, "unknown-model")
+	require.False(t, ok)
+}
+
+func TestResolveCanonicalListedModelSkipsPrunedTargets(t *testing.T) {
+	SetModelsListCatalogReader(&liveCatalogReaderStub{catalogs: map[int64][]string{
+		918291: {"other-live"},
+	}})
+	t.Cleanup(func() { SetModelsListCatalogReader(nil) })
+	repo := &modelsListAccountRepoStub{all: []Account{
+		{
+			ID:          918291,
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{"dead-alias": "gone-target"}},
+		},
+	}}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+	_, ok := svc.ResolveCanonicalListedModel(context.Background(), nil, "dead-alias")
+	require.False(t, ok)
+}
+
+func TestNormalizeModelSlugForDedupe(t *testing.T) {
+	if normalizeModelSlugForDedupe("StepFun/Step-5_Preview") != "stepfunstep5preview" {
+		t.Fatal("normalize must lowercase and drop separators")
+	}
+}
+
+func TestGetAvailableModels_NoReaderKeepsStaticMapping(t *testing.T) {
+	SetModelsListCatalogReader(nil)
+	repo := &modelsListAccountRepoStub{all: []Account{
+		{
+			ID:          918275,
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"model_mapping": map[string]any{"pub-dead": "gone-target"}},
+		},
+	}}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+	models := svc.GetAvailableModels(context.Background(), nil, PlatformOpenAI)
+	require.Equal(t, []string{"pub-dead"}, models)
+}
+
 func TestGetAvailableModels_OpenAIPassthroughUsesDefaultFallback(t *testing.T) {
 	groupID := int64(10)
 

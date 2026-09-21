@@ -24,6 +24,49 @@ func (f *fakeCatalogSyncer) SyncUpstreamModelCatalog(ctx context.Context, accoun
 	return &UpstreamModelCatalog{Models: []string{"m1"}}, nil
 }
 
+func TestUpstreamCatalogPollerFreshCatalogModels(t *testing.T) {
+	accounts := []Account{
+		{ID: 21, Name: "hop", Platform: "openai"},
+	}
+	poller := NewUpstreamCatalogPoller(&fakeCatalogSyncer{}, CatalogPollerConfig{
+		Interval: time.Hour,
+		StaleTTL: 15 * time.Minute,
+		Now:      func() time.Time { return time.Unix(0, 0) },
+		List:     func(context.Context) ([]Account, error) { return accounts, nil },
+		IsGemini: DefaultGeminiPlatform,
+	})
+	if _, ok := poller.FreshCatalogModels(21); ok {
+		t.Fatal("unknown account must not report a fresh catalog")
+	}
+	if err := poller.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	models, ok := poller.FreshCatalogModels(21)
+	if !ok || len(models) != 1 || models[0] != "m1" {
+		t.Fatalf("models=%v ok=%v, want [m1] true", models, ok)
+	}
+	if _, ok := poller.FreshCatalogModels(22); ok {
+		t.Fatal("untracked account must not report a fresh catalog")
+	}
+	var nilPoller *UpstreamCatalogPoller
+	if _, ok := nilPoller.FreshCatalogModels(21); ok {
+		t.Fatal("nil poller must not report a fresh catalog")
+	}
+}
+
+func TestSetModelsListCatalogReaderInstallAndReset(t *testing.T) {
+	poller := NewUpstreamCatalogPoller(&fakeCatalogSyncer{}, CatalogPollerConfig{})
+	SetModelsListCatalogReader(poller)
+	t.Cleanup(func() { SetModelsListCatalogReader(nil) })
+	if getModelsListCatalogReader() == nil {
+		t.Fatal("reader must be installed")
+	}
+	SetModelsListCatalogReader(nil)
+	if getModelsListCatalogReader() != nil {
+		t.Fatal("nil reader must disable pruning")
+	}
+}
+
 func TestCatalogPollerSkipsGeminiPlatforms(t *testing.T) {
 	accounts := []Account{
 		{ID: 1, Name: "gemini", Platform: "gemini"},

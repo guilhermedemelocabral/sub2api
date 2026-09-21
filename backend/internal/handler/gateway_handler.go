@@ -1120,6 +1120,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 // GET /v1/models and /v1/models/:model (also exposed through root aliases)
 // Returns models based on account configurations (model_mapping whitelist)
 // Falls back to default models if no whitelist is configured
+func apiKeyGroupOrNil(apiKey *service.APIKey) *service.Group {
+	if apiKey == nil {
+		return nil
+	}
+	return apiKey.Group
+}
+
 func (h *GatewayHandler) Models(c *gin.Context) {
 	apiKey, _ := middleware2.GetAPIKeyFromContext(c)
 
@@ -1132,6 +1139,18 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 	if forcedPlatform, ok := middleware2.GetForcePlatformFromContext(c); ok && strings.TrimSpace(forcedPlatform) != "" {
 		platform = forcedPlatform
+	}
+
+	if h != nil && h.gatewayService != nil && c.Param("model") != "" {
+		svc := h.gatewayService
+		gid := groupID
+		group := apiKeyGroupOrNil(apiKey)
+		c.Set(modelsAliasResolverKey, func(modelID string) (string, bool) {
+			if group != nil && group.ModelAllowlistEnabled() && !group.ModelAllowlist.Allows(modelID) {
+				return "", false
+			}
+			return svc.ResolveCanonicalListedModel(c.Request.Context(), gid, modelID)
+		})
 	}
 
 	if platform == service.PlatformOpenAI && apiKey != nil && apiKey.Group != nil &&

@@ -77,6 +77,11 @@ func writeModelsListResponse(c *gin.Context, models any) {
 	writeRetrievedModel(c, body)
 }
 
+// modelsAliasResolverKey carries an optional alias→canonical resolver stashed
+// by Models() so the free writer chain can serve retrieve for routable
+// aliases hidden from the served list by transparent-rename dedupe.
+const modelsAliasResolverKey = "sub2api.models_alias_resolver"
+
 func writeRetrievedModel(c *gin.Context, body []byte) {
 	var catalog struct {
 		Data []json.RawMessage `json:"data"`
@@ -102,8 +107,54 @@ func writeRetrievedModel(c *gin.Context, body []byte) {
 			return
 		}
 	}
+	if raw, ok := retrieveAliasedModel(c, catalog.Data, modelID); ok {
+		c.Data(http.StatusOK, "application/json", raw)
+		return
+	}
 	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
 		"type": "invalid_request_error", "code": "model_not_found", "param": "model",
 		"message": fmt.Sprintf("Model %q does not exist or is not available for this group", modelID),
 	}})
+}
+
+// retrieveAliasedModel serves retrieve for routable aliases hidden from the
+// served list by transparent-rename dedupe. It returns the canonical card
+// with the requested id echoed so alias users see the same parameters.
+func retrieveAliasedModel(c *gin.Context, entries []json.RawMessage, modelID string) (json.RawMessage, bool) {
+	if c == nil || modelID == "" {
+		return nil, false
+	}
+	raw, ok := c.Get(modelsAliasResolverKey)
+	if !ok {
+		return nil, false
+	}
+	resolve, ok := raw.(func(string) (string, bool))
+	if !ok || resolve == nil {
+		return nil, false
+	}
+	canonical, ok := resolve(modelID)
+	if !ok || canonical == "" || canonical == modelID {
+		return nil, false
+	}
+	for _, raw := range entries {
+		var model map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &model); err != nil {
+			continue
+		}
+		var entryID string
+		if err := json.Unmarshal(model["id"], &entryID); err != nil || entryID != canonical {
+			continue
+		}
+		echoed, err := json.Marshal(modelID)
+		if err != nil {
+			return nil, false
+		}
+		model["id"] = echoed
+		out, err := json.Marshal(model)
+		if err != nil {
+			return nil, false
+		}
+		return out, true
+	}
+	return nil, false
 }

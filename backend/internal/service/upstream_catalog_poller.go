@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -126,6 +127,53 @@ func (p *UpstreamCatalogPoller) State(accountID int64) *catalogAccountState {
 	return copyCatalogAccountState(p.state[accountID])
 }
 
+// FreshCatalogModels returns the last-synced live model IDs for accountID.
+// ok is false when no fresh catalog exists; callers must fail open and keep
+// serving static configuration. An empty-but-fresh list is authoritative.
+func (p *UpstreamCatalogPoller) FreshCatalogModels(accountID int64) (models []string, ok bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.state[accountID]
+	if st == nil || !st.Fresh || st.Catalog == nil {
+		return nil, false
+	}
+	return append([]string(nil), st.Catalog.Models...), true
+}
+
+// LiveCatalogReader exposes fresh upstream catalogs to the served-models
+// list without firing inference requests: the poller's 1/min GET is the
+// only upstream traffic behind it.
+type LiveCatalogReader interface {
+	FreshCatalogModels(accountID int64) (models []string, ok bool)
+}
+
+type liveCatalogReaderBox struct {
+	reader LiveCatalogReader
+}
+
+var modelsListCatalogReader atomic.Value // holds liveCatalogReaderBox
+
+// SetModelsListCatalogReader installs the process-wide live catalog source
+// for served-model pruning. A nil reader disables pruning (fail-open).
+func SetModelsListCatalogReader(reader LiveCatalogReader) {
+	modelsListCatalogReader.Store(liveCatalogReaderBox{reader: reader})
+}
+
+func getModelsListCatalogReader() LiveCatalogReader {
+	raw := modelsListCatalogReader.Load()
+	if raw == nil {
+		return nil
+	}
+	box, _ := raw.(liveCatalogReaderBox)
+	if box.reader == nil {
+		return nil
+	}
+	return box.reader
+}
+
 func tickCatalogPoller(ctx context.Context, poller *UpstreamCatalogPoller) {
 	if err := poller.Tick(ctx); err != nil {
 		logger.LegacyPrintf("service.upstream_catalog_poller", "tick_failed: err=%v", err)
@@ -135,6 +183,11 @@ func tickCatalogPoller(ctx context.Context, poller *UpstreamCatalogPoller) {
 // StartUpstreamCatalogPoller runs Tick on one goroutine (immediate, then every Interval).
 // stop cancels the loop and waits for the goroutine to exit. It is idempotent.
 func StartUpstreamCatalogPoller(ctx context.Context, syncer CatalogSyncer, listFn func(context.Context) ([]Account, error)) (stop func()) {
+	stop, _ = startUpstreamCatalogPollerWithHandle(ctx, syncer, listFn)
+	return stop
+}
+
+func startUpstreamCatalogPollerWithHandle(ctx context.Context, syncer CatalogSyncer, listFn func(context.Context) ([]Account, error)) (func(), *UpstreamCatalogPoller) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -160,12 +213,13 @@ func StartUpstreamCatalogPoller(ctx context.Context, syncer CatalogSyncer, listF
 		}
 	}()
 	var once sync.Once
-	return func() {
+	stop := func() {
 		once.Do(func() {
 			cancel()
 			<-done
 		})
 	}
+	return stop, poller
 }
 
 // UpstreamCatalogPollerRuntime is the process-wide catalog poller started on boot.
@@ -186,7 +240,10 @@ func ProvideUpstreamCatalogPoller(accountTestService *AccountTestService, accoun
 		return &UpstreamCatalogPollerRuntime{}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartUpstreamCatalogPoller(ctx, accountTestService, accountRepo.ListSchedulable)
+	stop, poller := startUpstreamCatalogPollerWithHandle(ctx, accountTestService, accountRepo.ListSchedulable)
+	// The served-models list prunes mapping keys whose upstream target left
+	// the live catalog. This stays GET-only: no inference is ever dispatched.
+	SetModelsListCatalogReader(poller)
 	return &UpstreamCatalogPollerRuntime{stop: func() {
 		stop()
 		cancel()
