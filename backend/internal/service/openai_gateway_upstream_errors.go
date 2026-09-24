@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -906,4 +908,106 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 
 	writeError(c, resp.StatusCode, errType, upstreamMsg)
 	return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
+}
+
+// maxUpstreamBadRequestBodyLogBytes bounds the translated upstream body kept
+// for 400 diagnosis. Validation failures can only be bisected with the exact
+// translated shape; 400s are rare so a generous bound is affordable.
+const maxUpstreamBadRequestBodyLogBytes = 131072
+
+// truncateUpstreamBadRequestBody keeps the whole body when it fits, else a
+// head slice with an explicit truncation marker (never silent).
+func truncateUpstreamBadRequestBody(body []byte) string {
+	if len(body) <= maxUpstreamBadRequestBodyLogBytes {
+		return string(body)
+	}
+	return string(body[:maxUpstreamBadRequestBodyLogBytes]) +
+		"\n...[truncated upstream request body]\n"
+}
+
+// summarizeUpstreamBadRequestBody sketches the translated shape: top-level
+// keys plus per-input-item type/role/content-kind/part-types. Shape-only, so
+// triage can spot a malformed item without reading the full body dump.
+func summarizeUpstreamBadRequestBody(body []byte) string {
+	var b strings.Builder
+	top := gjson.GetBytes(body, "@keys")
+	b.WriteString("keys=" + top.String() + ";")
+	items := gjson.GetBytes(body, "input")
+	if !items.IsArray() {
+		b.WriteString("input=" + items.Type.String())
+		return b.String()
+	}
+	roles := map[string]int{}
+	kinds := map[string]int{}
+	partTypes := map[string]int{}
+	arr := items.Array()
+	b.WriteString("input_items=" + strconv.Itoa(len(arr)) + ";")
+	for _, it := range arr {
+		roles[it.Get("type").String()+"/"+it.Get("role").String()]++
+		content := it.Get("content")
+		if content.IsArray() {
+			kinds["array"]++
+			for _, p := range content.Array() {
+				partTypes[p.Get("type").String()]++
+			}
+		} else if content.Type == gjson.String {
+			if content.String() == "" {
+				kinds["empty_string"]++
+			} else {
+				kinds["string"]++
+			}
+		} else {
+			kinds[content.Type.String()]++
+		}
+	}
+	b.WriteString("roles=" + sortedCountMap(roles) + ";")
+	b.WriteString("content=" + sortedCountMap(kinds) + ";")
+	b.WriteString("parts=" + sortedCountMap(partTypes))
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		b.WriteString(";tools=" + strconv.Itoa(len(tools.Array())))
+	}
+	return b.String()
+}
+
+func sortedCountMap(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		label := k
+		if label == "" {
+			label = "<empty>"
+		}
+		parts = append(parts, label+"x"+strconv.Itoa(m[k]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// logOpenAIUpstreamBadRequestBody captures the exact translated upstream body
+// when an upstream rejects with 400. Validation errors name the failing shape
+// but the translated bytes are otherwise unrecoverable, so keep them here.
+func logOpenAIUpstreamBadRequestBody(c *gin.Context, account *Account, upstreamModel string, upstreamStatusCode int, upstreamMsg string, translatedBody []byte) {
+	if upstreamStatusCode != http.StatusBadRequest || len(translatedBody) == 0 {
+		return
+	}
+	accountID := int64(0)
+	if account != nil {
+		accountID = account.ID
+	}
+	msg := strings.TrimSpace(upstreamMsg)
+	if len(msg) > 500 {
+		msg = msg[:500] + "...[truncated]"
+	}
+	logger.L().Warn("openai upstream 400: translated request body captured",
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", accountID),
+		zap.String("upstream_model", upstreamModel),
+		zap.Int("upstream_status_code", upstreamStatusCode),
+		zap.String("upstream_error_head", msg),
+		zap.String("request_shape", summarizeUpstreamBadRequestBody(translatedBody)),
+		zap.String("request_body", truncateUpstreamBadRequestBody(translatedBody)),
+	)
 }
