@@ -28,7 +28,7 @@ import (
 const (
 	ConfigFileName             = "config.yaml"
 	InstallLockFile            = ".installed"
-	defaultUserConcurrency     = 5
+	defaultUserConcurrency     = 0 // 0 = unlimited: router-only, limits come from providers
 	simpleModeAdminConcurrency = 30
 	defaultMigrationTimeout    = 60 * time.Second
 	postgresBootstrapDatabase  = "postgres"

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -1184,4 +1186,11 @@ func TestMatchModelsDevProviderOfficialHostsWithoutAPI(t *testing.T) {
 		Reasoning: new(bool), InputModalities: []string{"text"}, ContextWindow: 1050000,
 	}}
 	require.False(t, upstreamCatalogNeedsRegistry(capabilitySyncModelIDs([]string{"gpt-6-astra", "gpt-image-2"}), metadata))
+}
+
+func TestModelMetadataEnrichmentLogLevel(t *testing.T) {
+	require.Equal(t, slog.LevelDebug, modelMetadataEnrichmentLogLevel(errNoModelMetadataProvider))
+	require.Equal(t, slog.LevelDebug, modelMetadataEnrichmentLogLevel(fmt.Errorf("sync: %w", errNoModelMetadataProvider)))
+	require.Equal(t, slog.LevelWarn, modelMetadataEnrichmentLogLevel(errors.New("boom")))
+	require.Equal(t, slog.LevelWarn, modelMetadataEnrichmentLogLevel(nil))
 }

@@ -737,6 +737,11 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 	if s.cfg.RunMode == config.RunModeSimple {
 		return nil
 	}
+	// Router-only 模式：跳过所有金钱门禁（余额/订阅/quota/消费限额），
+	// 仅保留 RPM 作为流量保护。
+	if s.cfg.Billing.Disabled {
+		return s.checkRPM(ctx, user, group)
+	}
 	if s.circuitBreaker != nil && !s.circuitBreaker.Allow() {
 		return ErrBillingServiceUnavailable
 	}

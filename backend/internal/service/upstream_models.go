@@ -142,6 +142,19 @@ const (
 	UpstreamModelSyncErrorInternal UpstreamModelSyncErrorKind = "internal"
 )
 
+// errNoModelMetadataProvider reports that no models.dev registry provider
+// matches the account base URL (expected for private upstreams).
+var errNoModelMetadataProvider = errors.New("no model metadata provider matches account base URL")
+
+// modelMetadataEnrichmentLogLevel keeps genuine registry failures loud while
+// demoting the expected private-upstream mismatch to debug.
+func modelMetadataEnrichmentLogLevel(err error) slog.Level {
+	if errors.Is(err, errNoModelMetadataProvider) {
+		return slog.LevelDebug
+	}
+	return slog.LevelWarn
+}
+
 // UpstreamModelSyncError keeps internal failure details wrapped while exposing a safe client message.
 type UpstreamModelSyncError struct {
 	Kind       UpstreamModelSyncErrorKind
@@ -253,7 +266,10 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 				}
 			}
 		} else {
-			slog.Warn("upstream model capability metadata enrichment failed",
+			// Private upstreams (Flatt, local LLMBoost, …) never match the
+			// public registry; that is expected, not alarming. Genuine
+			// registry failures (HTTP/parse) stay at warn.
+			slog.Log(ctx, modelMetadataEnrichmentLogLevel(registryErr), "upstream model capability metadata enrichment failed",
 				"account_id", upstreamModelSyncAccountID(account),
 				"platform", upstreamModelSyncPlatform(account),
 				"error", registryErr,
@@ -502,7 +518,7 @@ func (s *AccountTestService) fetchModelsDevMetadata(
 	}
 	provider, ok := matchModelsDevProvider(registry, upstreamModelRegistryBaseURL(account))
 	if !ok {
-		return nil, fmt.Errorf("no model metadata provider matches account base URL")
+		return nil, errNoModelMetadataProvider
 	}
 
 	metadata := make(map[string]UpstreamModelMetadata)

@@ -203,7 +203,9 @@ func TestWriteConfigFileKeepsDefaultUserConcurrency(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
-	if !strings.Contains(string(data), "user_concurrency: 5") {
+	// Router-only: fresh installs default to unlimited user concurrency (0);
+	// effective limits come from each provider account.
+	if !strings.Contains(string(data), "user_concurrency: 0") {
 		t.Fatalf("config missing default user concurrency, got:\n%s", string(data))
 	}
 }

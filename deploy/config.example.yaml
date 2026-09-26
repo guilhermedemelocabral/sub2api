@@ -1098,6 +1098,11 @@ pricing:
 # 计费配置
 # =============================================================================
 billing:
+  # Router-only mode: skip all money gates (balance/subscription/quota/spend
+  # limits) and zero post-usage money movement. Usage logs keep token counts.
+  # RPM limits still apply. Env override: BILLING_DISABLED=true
+  # 纯路由模式：跳过所有金钱门禁且金钱归零，仅保留 RPM 限流。
+  disabled: false
   circuit_breaker:
     # Enable circuit breaker for billing service
     # 启用计费服务熔断器
