@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -26,6 +27,11 @@ import (
 )
 
 const openAIResponsesClientToolMappingContextKey = "openai_responses_client_tool_mapping"
+
+// errStreamDataIntervalTimeout reports an upstream stall in passthrough
+// streaming (same message as the other forward paths for taxonomy
+// consistency). Pre-output stalls surface as *UpstreamFailoverError instead.
+var errStreamDataIntervalTimeout = errors.New("stream data interval timeout")
 
 func hasOpenAIResponsesClientToolMapping(mapping apicompat.ResponsesClientToolMapping) bool {
 	return len(mapping.CustomTools) > 0 || mapping.ToolSearch || len(mapping.NamespaceTools) > 0
@@ -1992,6 +1998,53 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	documentScanner := newOpenAISSEJSONDocumentScanner(scanner)
 
 	needModelReplace := strings.TrimSpace(originalModel) != "" && strings.TrimSpace(mappedModel) != "" && strings.TrimSpace(originalModel) != strings.TrimSpace(mappedModel)
+
+	// ── 上游空闲看门狗 ──────────────────────────────────────────────────
+	// 透传路径历史上没有流间隔保护：上游停发数据时下面的 Scan 循环永久阻塞，
+	// 直到上游主动断连（如 Flatt 300s 空闲关闭）或客户端掉线。
+	// 看门狗复用 StreamDataIntervalTimeout：超过间隔无上游字节即判定断流，
+	// 关闭 body 唤醒 Scan；错误语义与"未收 [DONE] 即结束"一致
+	// （无输出 → failover，有输出 → 硬错），避免静默数百秒。
+	// 推理模型的 thinking 以流式增量下发，会持续刷新计时；真正的数百秒
+	// 全静默即断流。0 表示沿用旧行为（禁用）。
+	streamInterval := time.Duration(0)
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	var lastUpstreamReadAt atomic.Int64
+	lastUpstreamReadAt.Store(time.Now().UnixNano())
+	var upstreamIdleTimedOut atomic.Bool
+	idleDone := make(chan struct{})
+	defer close(idleDone)
+	if streamInterval > 0 {
+		tick := streamInterval / 4
+		if tick < time.Second {
+			tick = time.Second
+		}
+		if tick > time.Minute {
+			tick = time.Minute
+		}
+		go func() {
+			ticker := time.NewTicker(tick)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-idleDone:
+					return
+				case <-ticker.C:
+					if time.Since(time.Unix(0, lastUpstreamReadAt.Load())) < streamInterval {
+						continue
+					}
+					if upstreamIdleTimedOut.CompareAndSwap(false, true) {
+						logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] upstream stream data interval timeout: account=%d interval=%s", account.ID, streamInterval)
+						_ = resp.Body.Close()
+					}
+					return
+				}
+			}
+		}()
+	}
+
 	resultWithUsage := func() *openaiStreamingResultPassthrough {
 		return &openaiStreamingResultPassthrough{
 			usage:            usage,
@@ -2003,6 +2056,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 
 	for documentScanner.Scan() {
+		lastUpstreamReadAt.Store(time.Now().UnixNano())
 		line := documentScanner.Text()
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
@@ -2230,6 +2284,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 	}
 	ensureResponseFailedTerminal()
+	if upstreamIdleTimedOut.Load() && !sawDone && !sawTerminalEvent && !sawFailedEvent && !clientDisconnected && ctx.Err() == nil {
+		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return resultWithUsage(),
+				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream data interval timeout")
+		}
+		s.recordOpenAIProxyStreamDisconnect(account, errStreamDataIntervalTimeout, upstreamRequestID)
+		return resultWithUsage(), errStreamDataIntervalTimeout
+	}
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)

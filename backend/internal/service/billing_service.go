@@ -903,6 +903,30 @@ func (s *BillingService) initFallbackPricing() {
 		SupportsCacheBreakdown:  false,
 	}
 
+	// ---- 阶跃星辰 StepFun（step-5-preview）----
+	// Source: https://platform.stepfun.ai/docs/en/guides/pricing/details
+	// Multimodal Reasoning Models: step-5-preview $1.00 input / $0.05 cached
+	// input / $2.70 output per 1M tokens. Output tokens include reasoning +
+	// final answer. 网关别名 stepfun-step-5-preview / stepfun/step-5-preview
+	// 与正名同价（见 getFallbackPricing）。
+	s.fallbackPrices["step-5-preview"] = &ModelPricing{
+		InputPricePerToken:     1e-6, // $1.00 per MTok (cache miss, 含 cache 写入)
+		OutputPricePerToken:    2.7e-6,
+		CacheReadPricePerToken: 0.05e-6, // $0.05 per MTok (cache hit)
+		SupportsCacheBreakdown: false,
+	}
+
+	// ---- 本地 LLMBoost（Ryzen vLLM）----
+	// qwen3.8-flash-next 跑在自有算力上，无按 token 成本。记零价条目，
+	// 与 z.ai Free 档（glm-4.5-flash / glm-4.7-flash）口径一致，避免
+	// fail-closed 误告警。
+	s.fallbackPrices["qwen3.8-flash-next"] = &ModelPricing{
+		InputPricePerToken:     0,
+		OutputPricePerToken:    0,
+		CacheReadPricePerToken: 0,
+		SupportsCacheBreakdown: false,
+	}
+
 	// xAI Grok 4.5: $2 input / $0.30 cached input / $6 output below 200k;
 	// long-context rates are $4 / $0.60 / $12 (>=200k prompt tokens).
 	s.fallbackPrices["grok-4.5"] = &ModelPricing{
@@ -1073,6 +1097,12 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	if strings.Contains(modelLower, "deepseek-v4-flash-vision-exp") {
 		return s.fallbackPrices["deepseek-v4-flash-vision-exp"]
 	}
+	// deepseek-v4.1-flash 是 deepseek-flash 的正式名（旧名 deepseek-v4-flash
+	// 兼容路由），与 flash 同价。显式分支保证 betallm- / commandcode/…/
+	// 前缀别名也能命中（HasPrefix deepseek- 覆盖不到带前缀的 id）。
+	if strings.Contains(modelLower, "deepseek-v4.1-flash") {
+		return s.fallbackPrices["deepseek-v4-flash"]
+	}
 	if strings.Contains(modelLower, "deepseek-v4-flash") {
 		return s.fallbackPrices["deepseek-v4-flash"]
 	}
@@ -1091,7 +1121,7 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	// 匹配顺序：先判别最高 tier，再依次降级。
 	// 注意：带小数点的型号必须排在裸 "glm-5" 之前，否则会被 strings.Contains 抢走；
 	// glm-5.3-flash 必须排在 glm-5.3 之前（前者包含后者子串）。
-	if strings.Contains(modelLower, "glm-5.3-flash") || strings.Contains(modelLower, "glm-5.3flash") {
+	if strings.Contains(modelLower, "glm-5.3-flash") || strings.Contains(modelLower, "glm-5.3flash") || strings.Contains(modelLower, "glm53flash") {
 		return s.fallbackPrices["glm-5.3-flash"]
 	}
 	if strings.Contains(modelLower, "glm-5.3") {
@@ -1191,6 +1221,16 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	// 覆盖带版本后缀的别名（如 doubao-embedding-vision-251215）。
 	if strings.Contains(modelLower, "doubao-embedding-vision") {
 		return s.fallbackPrices["doubao-embedding-vision"]
+	}
+
+	// 阶跃星辰 StepFun（step-5-preview；含 stepfun- / stepfun/ 网关别名）。
+	if strings.Contains(modelLower, "step-5-preview") {
+		return s.fallbackPrices["step-5-preview"]
+	}
+
+	// 本地 LLMBoost 自有算力：零价，不 fail-closed。
+	if strings.Contains(modelLower, "qwen3.8-flash-next") {
+		return s.fallbackPrices["qwen3.8-flash-next"]
 	}
 
 	// OpenAI（GPT-5 / Codex 族）：仅匹配已知型号，避免未知 OpenAI 型号误计价。

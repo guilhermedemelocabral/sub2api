@@ -909,6 +909,11 @@ func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error)
 
 type BillingConfig struct {
 	CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
+	// Disabled turns the gateway into a pure model router: pre-request money
+	// gates (balance / subscription / quota / spend limits) are skipped and
+	// post-usage money movement is zeroed. Usage logs keep token counts for
+	// observability; RPM limits still apply as traffic protection.
+	Disabled bool `mapstructure:"disabled"`
 	// MinimumBalanceReserve is the conservative preflight floor for balance billing.
 	// Requests in balance mode are rejected when the cached balance is below this
 	// amount, even if it is still positive. Set to 0 to keep the legacy balance > 0 gate.
@@ -2118,6 +2123,7 @@ func setDefaults() {
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
 
 	// Billing
+	viper.SetDefault("billing.disabled", false)
 	viper.SetDefault("billing.circuit_breaker.enabled", true)
 	viper.SetDefault("billing.circuit_breaker.failure_threshold", 5)
 	viper.SetDefault("billing.circuit_breaker.reset_timeout_seconds", 30)
@@ -2329,7 +2335,7 @@ func setDefaults() {
 	// Do not ship fixed defaults here to avoid insecure "known credentials" in production.
 	viper.SetDefault("default.admin_email", "")
 	viper.SetDefault("default.admin_password", "")
-	viper.SetDefault("default.user_concurrency", 5)
+	viper.SetDefault("default.user_concurrency", 0) // 0 = unlimited: router-only, limits come from providers
 	viper.SetDefault("default.user_balance", 0)
 	viper.SetDefault("default.api_key_prefix", "sk-")
 	viper.SetDefault("default.rate_multiplier", 1.0)

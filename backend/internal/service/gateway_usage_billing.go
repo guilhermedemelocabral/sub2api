@@ -355,6 +355,12 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		return false, nil
 	}
 
+	// Router-only 模式：金钱归零，余额/订阅/quota 永不动；token 计数保留，
+	// 使用日志照常记录以便观测。
+	if deps.cfg != nil && deps.cfg.Billing.Disabled && p.Cost != nil {
+		*p.Cost = CostBreakdown{BillingMode: p.Cost.BillingMode}
+	}
+
 	cmd := buildUsageBillingCommand(requestID, usageLog, p)
 	if cmd == nil || cmd.RequestID == "" || repo == nil {
 		if p.SimpleModeKeyRateLimitOnly {

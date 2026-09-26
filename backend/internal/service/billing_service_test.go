@@ -570,6 +570,100 @@ func TestGetFallbackPricing_FamilyMatching(t *testing.T) {
 			expectedOutput:    floatPtr(6e-7),
 			expectedCacheRead: floatPtr(3e-9),
 		},
+		{
+			// deepseek-v4.1-flash 是 deepseek-flash 的正式名（旧名 deepseek-v4-flash
+			// 兼容路由），与 flash 同价。网关别名前缀（betallm- / commandcode/…/）
+			// 不得破坏系列匹配。
+			name:              "deepseek v4.1 flash maps to flash",
+			model:             "deepseek-v4.1-flash",
+			expectedInput:     1.5e-7,
+			expectedOutput:    floatPtr(6e-7),
+			expectedCacheRead: floatPtr(3e-9),
+		},
+		{
+			name:              "commandcode deepseek v4.1 flash maps to flash",
+			model:             "commandcode/deepseek/deepseek-v4.1-flash",
+			expectedInput:     1.5e-7,
+			expectedOutput:    floatPtr(6e-7),
+			expectedCacheRead: floatPtr(3e-9),
+		},
+		{
+			name:              "betallm deepseek v4.1 flash maps to flash",
+			model:             "betallm-deepseek-v4.1-flash",
+			expectedInput:     1.5e-7,
+			expectedOutput:    floatPtr(6e-7),
+			expectedCacheRead: floatPtr(3e-9),
+		},
+		{
+			// betallm-glm53flash 是 Flatt 改名前的无横线别名（glm53flash →
+			// glm-5.3-flash），与 glm-5.3-flash 同价。
+			name:              "betallm glm53flash legacy alias maps to glm 5.3 flash",
+			model:             "betallm-glm53flash",
+			expectedInput:     0.15e-6,
+			expectedOutput:    floatPtr(0.5e-6),
+			expectedCacheRead: floatPtr(0.03e-6),
+		},
+		{
+			name:              "commandcode glm 5.3 flash maps to glm 5.3 flash",
+			model:             "commandcode/z-ai/glm-5.3-flash",
+			expectedInput:     0.15e-6,
+			expectedOutput:    floatPtr(0.5e-6),
+			expectedCacheRead: floatPtr(0.03e-6),
+		},
+		{
+			// StepFun 官方价（platform.stepfun.ai/docs/en/guides/pricing/details）：
+			// step-5-preview $1.00 / $0.05 cached / $2.70。网关别名 stepfun-*
+			// 与正名同价。
+			name:              "step 5 preview official price",
+			model:             "step-5-preview",
+			expectedInput:     1e-6,
+			expectedOutput:    floatPtr(2.7e-6),
+			expectedCacheRead: floatPtr(0.05e-6),
+		},
+		{
+			name:              "stepfun step 5 preview alias official price",
+			model:             "stepfun-step-5-preview",
+			expectedInput:     1e-6,
+			expectedOutput:    floatPtr(2.7e-6),
+			expectedCacheRead: floatPtr(0.05e-6),
+		},
+		{
+			name:              "stepfun path step 5 preview alias official price",
+			model:             "stepfun/step-5-preview",
+			expectedInput:     1e-6,
+			expectedOutput:    floatPtr(2.7e-6),
+			expectedCacheRead: floatPtr(0.05e-6),
+		},
+		{
+			// qwen3.8-flash-next 跑在本地 LLMBoost（Ryzen vLLM），无按 token
+			// 成本，记零价而非 fail-closed。
+			name:              "local qwen3.8-flash-next is zero cost",
+			model:             "qwen3.8-flash-next",
+			expectedInput:     0,
+			expectedOutput:    floatPtr(0),
+			expectedCacheRead: floatPtr(0),
+		},
+		{
+			// 未知官方价的在用模型：不回退、不误计价，保持 fail-closed。
+			name:             "qwen3.8-27b unknown price stays fail-closed",
+			model:            "qwen3.8-27b",
+			expectNilPricing: true,
+		},
+		{
+			name:             "muse-spark-1.3 unknown price stays fail-closed",
+			model:            "muse-spark-1.3",
+			expectNilPricing: true,
+		},
+		{
+			name:             "commandcode muse contributor unknown price stays fail-closed",
+			model:            "commandcode/meta/muse-spark-1.3-contributor",
+			expectNilPricing: true,
+		},
+		{
+			name:             "commandcode qwen omni flash unknown price stays fail-closed",
+			model:            "commandcode/Qwen/Qwen3.8-Omni-Flash",
+			expectNilPricing: true,
+		},
 
 		// ---- 智谱 GLM（z.ai USD 口径）----
 		{
