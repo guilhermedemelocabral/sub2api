@@ -197,6 +197,18 @@ func TestGroupModelAllowlistFilterForListing(t *testing.T) {
 		}
 	})
 
+	t.Run("suffix wildcard keeps free models from the fetched catalog", func(t *testing.T) {
+		cfg := GroupModelAllowlist{Enabled: true, Models: []string{"*-free", "mimo-v2.6-flash"}}
+		got := cfg.FilterForListing([]string{"grok-4.7", "space-bunny-free", "mimo-v2.6-flash", "longcat-2.5-preview-free"})
+		want := []string{"space-bunny-free", "longcat-2.5-preview-free", "mimo-v2.6-flash"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("got %#v want %#v", got, want)
+		}
+		if !cfg.Allows("NEW-MODEL-FREE") || cfg.Allows("grok-4.7") {
+			t.Fatal("suffix wildcard must allow only free ids")
+		}
+	})
+
 	t.Run("wildcard entries expand to source order", func(t *testing.T) {
 		cfg := GroupModelAllowlist{Enabled: true, Models: []string{"claude-*", "gpt-5.5-*"}}
 		got := cfg.FilterForListing(source)

@@ -1173,6 +1173,11 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 			lastDataAt = time.Now()
 			s.observeAntigravityGeminiSSELine(c, ev.line)
+			if isAntigravityMalformedFunctionCallLine(ev.line) {
+				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
+					return nil, retryErr
+				}
+			}
 
 			// 处理 SSE 行，转换为 Claude 格式
 			claudeEvents := processor.ProcessLine(strings.TrimRight(ev.line, "\r\n"))

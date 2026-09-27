@@ -119,6 +119,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if account.IsOpenCodeGo() {
 		mapped := resolveOpenCodeGoMappedModel(account, body, defaultMappedModel)
 		proto := openCodeGoNativeProtocol(account, mapped)
+		if err := rejectOpenCodeGoForeignProtocol(c, proto, APIProtocolChatCompletions); err != nil {
+			return nil, err
+		}
 		if proto != APIProtocolResponses {
 			if isResponsesShape {
 				if proto == APIProtocolAnthropic {

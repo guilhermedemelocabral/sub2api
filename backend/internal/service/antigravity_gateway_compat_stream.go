@@ -354,6 +354,11 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
+			if isAntigravityMalformedFunctionCallLine(event.line) {
+				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
+					return nil, retryErr
+				}
+			}
 			session.consume(event.line)
 
 		case <-timeoutCh:
