@@ -2142,6 +2142,8 @@ func TestForwardAsAnthropic_MissingTerminalAfterOutputRecordsOpsWithoutFailover(
 	require.True(t, c.Writer.Written())
 	require.Contains(t, rec.Body.String(), "event: message_start")
 	require.Contains(t, rec.Body.String(), "partial")
+	require.Contains(t, rec.Body.String(), "event: message_stop")
+	require.Contains(t, rec.Body.String(), `"stop_reason":"end_turn"`)
 
 	events := openAICompatOpsEvents(t, c)
 	require.Len(t, events, 1)

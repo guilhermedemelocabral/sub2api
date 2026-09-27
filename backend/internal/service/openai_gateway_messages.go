@@ -1190,6 +1190,25 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		if !clientOutputStarted {
 			return result, s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, message)
 		}
+		// The client already has a partial Anthropic stream. Close it with
+		// message_delta/message_stop so tool clients are not left mid tool_use
+		// when response.completed never parsed.
+		if finalEvents := apicompat.FinalizeResponsesAnthropicStream(state); len(finalEvents) > 0 {
+			for _, evt := range finalEvents {
+				sse, sseErr := apicompat.ResponsesAnthropicEventToSSE(evt)
+				if sseErr != nil {
+					continue
+				}
+				writeStreamHeaders()
+				if _, writeErr := fmt.Fprint(c.Writer, sse); writeErr != nil {
+					clientDisconnected = true
+					break
+				}
+			}
+			if !clientDisconnected {
+				c.Writer.Flush()
+			}
+		}
 		s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, "stream_missing_terminal", message)
 		return result, fmt.Errorf("stream usage incomplete: missing terminal event")
 	}

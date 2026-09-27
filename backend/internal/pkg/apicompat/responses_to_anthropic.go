@@ -195,6 +195,11 @@ type ResponsesEventToAnthropicState struct {
 
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
+	// ItemIDToBlockIdx maps Responses item id / call id → Anthropic content block index.
+	// Some compatible gateways omit output_index on argument deltas; the zero value
+	// then collides with an earlier reasoning item.
+	ItemIDToBlockIdx map[string]int
+	CurrentItemID    string
 
 	// textByPart records the text already delivered for each output_text part
 	// so that a done payload can be reconciled against it. It outlives the
@@ -217,6 +222,7 @@ type ResponsesEventToAnthropicState struct {
 func NewResponsesEventToAnthropicState() *ResponsesEventToAnthropicState {
 	return &ResponsesEventToAnthropicState{
 		OutputIndexToBlockIdx: make(map[int]int),
+		ItemIDToBlockIdx:      make(map[string]int),
 		textByPart:            make(map[responsesTextPart]*strings.Builder),
 		Created:               time.Now().Unix(),
 	}
@@ -247,7 +253,10 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleOutputItemDone(evt, state)
 	case "response.reasoning_summary_text.delta",
 		// 原始推理文本增量，与 reasoning summary 一样映射为 thinking。
-		"response.reasoning_text.delta":
+		"response.reasoning_text.delta",
+		// GLM/BetaLLM emite response.reasoning.delta (item_id, sem output_index)
+		// em vez de response.reasoning_summary_text.delta.
+		"response.reasoning.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
 	case "response.reasoning_summary_text.done":
 		// Keep the thinking block open until response.output_item.done.
@@ -357,6 +366,7 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 
 		idx := state.ContentBlockIndex
 		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
+		resToAnthRememberItem(state, evt.Item, idx)
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "tool_use"
 		state.CurrentToolName = evt.Item.Name
@@ -382,6 +392,7 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 
 		idx := state.ContentBlockIndex
 		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
+		resToAnthRememberItem(state, evt.Item, idx)
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "thinking"
 		state.PendingThinkingSignature = strings.TrimSpace(evt.Item.EncryptedContent)
@@ -506,7 +517,7 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 			return nil
 		}
 
-		blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+		blockIdx, ok := resToAnthToolBlockIndex(evt, state)
 		if !ok {
 			return nil
 		}
@@ -526,7 +537,7 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		state.CurrentToolHadDelta = true
 	}
 
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	blockIdx, ok := resToAnthToolBlockIndex(evt, state)
 	if !ok {
 		return nil
 	}
@@ -564,8 +575,8 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEven
 		raw = string(sanitized)
 	}
 
-	// 从事件的 OutputIndex 解析正确的 block index，与 resToAnthHandleFuncArgsDelta 对齐
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	// 从 item_id / output_index 解析正确的 block index，与 resToAnthHandleFuncArgsDelta 对齐
+	blockIdx, ok := resToAnthToolBlockIndex(evt, state)
 	if !ok {
 		blockIdx = state.ContentBlockIndex
 	}
@@ -592,7 +603,13 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 		return nil
 	}
 
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	blockIdx, ok := resToAnthItemBlockIndex(evt, state)
+	if !ok {
+		if state.ContentBlockOpen && state.CurrentBlockType == "thinking" {
+			blockIdx = state.ContentBlockIndex
+			ok = true
+		}
+	}
 	if !ok {
 		return nil
 	}
@@ -631,10 +648,85 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		}
 	}
 
-	if state.ContentBlockOpen {
+	if state.ContentBlockOpen && resToAnthDoneMatchesOpenBlock(evt, state) {
 		return closeCurrentBlock(state)
 	}
 	return nil
+}
+
+// resToAnthRememberItem records which Anthropic block an upstream item opened.
+func resToAnthRememberItem(state *ResponsesEventToAnthropicState, item *ResponsesOutput, idx int) {
+	if state.ItemIDToBlockIdx == nil {
+		state.ItemIDToBlockIdx = map[string]int{}
+	}
+	if item == nil {
+		state.CurrentItemID = ""
+		return
+	}
+	if id := strings.TrimSpace(item.ID); id != "" {
+		state.ItemIDToBlockIdx[id] = idx
+		state.CurrentItemID = id
+	} else {
+		state.CurrentItemID = ""
+	}
+	if id := strings.TrimSpace(item.CallID); id != "" {
+		state.ItemIDToBlockIdx[id] = idx
+	}
+}
+
+// resToAnthItemBlockIndex resolves a delta to the Anthropic block opened for
+// its item. item_id wins over output_index because compatible gateways often
+// omit output_index, and the zero value points at an earlier reasoning item.
+func resToAnthItemBlockIndex(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) (int, bool) {
+	if evt == nil || state == nil {
+		return 0, false
+	}
+	if id := strings.TrimSpace(evt.ItemID); id != "" && state.ItemIDToBlockIdx != nil {
+		if idx, ok := state.ItemIDToBlockIdx[id]; ok {
+			return idx, true
+		}
+	}
+	if state.OutputIndexToBlockIdx == nil {
+		return 0, false
+	}
+	idx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	return idx, ok
+}
+
+// resToAnthToolBlockIndex resolves a function-call delta. item_id is preferred:
+// compatible gateways omit output_index, and the zero value aliases the
+// reasoning item that was opened first.
+func resToAnthToolBlockIndex(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) (int, bool) {
+	if evt != nil && state != nil && state.ItemIDToBlockIdx != nil {
+		if id := strings.TrimSpace(evt.ItemID); id != "" {
+			if idx, ok := state.ItemIDToBlockIdx[id]; ok {
+				return idx, true
+			}
+		}
+	}
+	return resToAnthItemBlockIndex(evt, state)
+}
+
+// resToAnthDoneMatchesOpenBlock reports whether an output_item.done event
+// belongs to the block that is currently open. A late reasoning "done" must
+// not close a tool_use block that was opened after the reasoning item.
+func resToAnthDoneMatchesOpenBlock(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) bool {
+	if evt == nil || evt.Item == nil || state == nil || !state.ContentBlockOpen {
+		return false
+	}
+	if id := strings.TrimSpace(evt.Item.ID); id != "" && id == state.CurrentItemID {
+		return true
+	}
+	switch evt.Item.Type {
+	case "reasoning":
+		return state.CurrentBlockType == "thinking"
+	case "function_call", "custom_tool_call":
+		return state.CurrentBlockType == "tool_use"
+	case "message":
+		return state.CurrentBlockType == "text"
+	default:
+		return true
+	}
 }
 
 // resToAnthHandleWebSearchDone converts an OpenAI web_search_call output item
@@ -803,6 +895,7 @@ func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamE
 	}
 	state.ContentBlockOpen = false
 	state.ContentBlockIndex++
+	state.CurrentItemID = ""
 	state.CurrentToolName = ""
 	state.CurrentToolArgs = ""
 	state.CurrentToolHadDelta = false

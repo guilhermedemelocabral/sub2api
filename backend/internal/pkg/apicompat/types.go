@@ -456,7 +456,7 @@ func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
 	}
 	if kind.Type != "tool_search_call" {
 		var decoded responsesOutputAlias
-		if err := json.Unmarshal(data, &decoded); err != nil {
+		if err := json.Unmarshal(coerceBareReasoningSummary(data), &decoded); err != nil {
 			return err
 		}
 		*o = ResponsesOutput(decoded)
@@ -492,6 +492,30 @@ func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// coerceBareReasoningSummary wraps a string `summary` field as a one-element
+// array so ResponsesSummary.UnmarshalJSON can accept it. Array forms, including
+// arrays of strings, are left untouched.
+func coerceBareReasoningSummary(data []byte) []byte {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return data
+	}
+	raw, ok := fields["summary"]
+	if !ok {
+		return data
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '"' {
+		return data
+	}
+	fields["summary"] = append(append([]byte{'['}, raw...), ']')
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
 // WebSearchAction describes the search action in a web_search_call output item.
 type WebSearchAction struct {
 	Type  string `json:"type,omitempty"`  // "search"
@@ -502,6 +526,32 @@ type WebSearchAction struct {
 type ResponsesSummary struct {
 	Type string `json:"type"` // "summary_text"
 	Text string `json:"text"`
+}
+
+// UnmarshalJSON accepts the official object form and the string form some
+// OpenAI-compatible gateways emit (`summary: ["text"]` or a bare string).
+// A string element otherwise fails the whole response.completed event, so the
+// Anthropic stream never receives message_stop.
+func (s *ResponsesSummary) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		*s = ResponsesSummary{Type: "summary_text", Text: text}
+		return nil
+	}
+	type responsesSummaryAlias ResponsesSummary
+	var decoded responsesSummaryAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*s = ResponsesSummary(decoded)
+	return nil
 }
 
 // ResponsesUsage holds token counts in Responses API format.
