@@ -297,6 +297,7 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 		items = append(items, ResponsesInputItem{
 			Type:             "reasoning",
 			EncryptedContent: sig,
+			Summary:          anthropicThinkingSummary(b.Thinking),
 		})
 	}
 
@@ -330,6 +331,17 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 	}
 
 	return items, nil
+}
+
+func anthropicThinkingSummary(thinking string) json.RawMessage {
+	if strings.TrimSpace(thinking) == "" {
+		return json.RawMessage(`[]`)
+	}
+	summary, err := json.Marshal([]ResponsesSummary{{Type: "summary_text", Text: thinking}})
+	if err != nil {
+		return json.RawMessage(`[]`)
+	}
+	return summary
 }
 
 // toResponsesCallID preserves Anthropic tool IDs as Responses call_id values.

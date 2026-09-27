@@ -193,8 +193,32 @@ func TestAnthropicToResponses_ThinkingSignatureBecomesReasoning(t *testing.T) {
 	require.GreaterOrEqual(t, len(items), 4)
 	assert.Equal(t, "reasoning", items[1].Type)
 	assert.Equal(t, "enc-rs-1", items[1].EncryptedContent)
+	assert.JSONEq(t, `[{"type":"summary_text","text":"plan"}]`, string(items[1].Summary))
 	assert.Equal(t, "assistant", items[2].Role)
 	assert.Equal(t, "function_call", items[3].Type)
+}
+
+func TestAnthropicToResponses_SignatureOnlyThinkingKeepsEmptySummary(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "muse-spark-1.3-contributor",
+		MaxTokens: 1024,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`"weather?"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"","signature":"Q-PaDgEH1-opaque"},{"type":"tool_use","id":"call_1","name":"get_weather","input":{"city":"SP"}}]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_1","content":"23C"}]`)},
+		},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+
+	var raw []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(resp.Input, &raw))
+	require.GreaterOrEqual(t, len(raw), 2)
+	assert.JSONEq(t, `"reasoning"`, string(raw[1]["type"]))
+	summary, ok := raw[1]["summary"]
+	require.True(t, ok, "reasoning input item must carry summary")
+	assert.JSONEq(t, `[]`, string(summary))
 }
 
 func TestAnthropicToResponses_MaxTokensFloor(t *testing.T) {

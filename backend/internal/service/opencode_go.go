@@ -1,11 +1,13 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/gin-gonic/gin"
 )
 
 // OpenCode Go 是 OpenCode Zen 的订阅网关：同一 API Key 下按模型分流到
@@ -302,6 +304,34 @@ func openCodeGoNativeProtocol(account *Account, model string) string {
 	default:
 		return APIProtocolChatCompletions
 	}
+}
+
+// rejectOpenCodeGoForeignProtocol answers 400 when the client calls a model
+// outside its native OpenCode Go protocol. Converting between protocols
+// rewrites tool calls and reasoning, so each model only runs on its own API.
+func rejectOpenCodeGoForeignProtocol(c *gin.Context, native, inbound string) error {
+	if native == inbound {
+		return nil
+	}
+	var message string
+	switch native {
+	case APIProtocolAnthropic:
+		message = "This model answers in the Anthropic Messages API. Use POST /v1/messages."
+	case APIProtocolResponses:
+		message = "This model answers in the OpenAI Responses API. Use POST /v1/responses."
+	default:
+		message = "This model answers in the OpenAI Chat Completions API. Use POST /v1/chat/completions."
+	}
+	MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+	switch inbound {
+	case APIProtocolAnthropic:
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", message)
+	case APIProtocolResponses:
+		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", message)
+	default:
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", message)
+	}
+	return errors.New(message)
 }
 
 // ResolveOpenCodeGoUpstreamProtocol 按账号协议配置与模型规则决定上游协议。

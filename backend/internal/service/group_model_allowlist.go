@@ -107,6 +107,15 @@ func (a GroupModelAllowlist) Allows(model string) bool {
 			continue
 		}
 		entry = strings.ToLower(entry)
+		if strings.HasPrefix(entry, "*") && !strings.HasSuffix(entry, "*") {
+			suffix := strings.TrimPrefix(entry, "*")
+			for _, candidate := range candidates {
+				if suffix != "" && strings.HasSuffix(candidate, suffix) {
+					return true
+				}
+			}
+			continue
+		}
 		if strings.HasSuffix(entry, "*") {
 			prefix := strings.TrimSuffix(entry, "*")
 			for _, candidate := range candidates {
@@ -186,6 +195,17 @@ func (a GroupModelAllowlist) FilterForListing(source []string) []string {
 	for _, entry := range a.Models {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
+			continue
+		}
+		if strings.HasPrefix(entry, "*") && !strings.HasSuffix(entry, "*") {
+			suffix := strings.ToLower(strings.TrimPrefix(entry, "*"))
+			if suffix != "" {
+				for _, pattern := range patterns {
+					if strings.HasSuffix(strings.ToLower(pattern), suffix) {
+						add(pattern)
+					}
+				}
+			}
 			continue
 		}
 		if strings.HasSuffix(entry, "*") {
