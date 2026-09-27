@@ -196,6 +196,9 @@ func RegisterGatewayRoutes(
 	{
 		// /v1/messages: auto-route based on group platform
 		gateway.POST("/messages", func(c *gin.Context) {
+			if rejectForeignOriginProtocol(c, originInboundMessages) {
+				return
+			}
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.Messages(c)
 				return
@@ -216,6 +219,9 @@ func RegisterGatewayRoutes(
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		// OpenAI Responses API: auto-route based on group platform
 		gateway.POST("/responses", func(c *gin.Context) {
+			if rejectForeignOriginProtocol(c, originInboundResponses) {
+				return
+			}
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.Responses(c)
 				return
@@ -235,6 +241,9 @@ func RegisterGatewayRoutes(
 		})
 		// OpenAI Chat Completions API: auto-route based on group platform
 		gateway.POST("/chat/completions", func(c *gin.Context) {
+			if rejectForeignOriginProtocol(c, originInboundChat) {
+				return
+			}
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.ChatCompletions(c)
 				return
@@ -352,11 +361,19 @@ func RegisterGatewayRoutes(
 		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
 		gemini.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
 		// Gin treats ":" as a param marker, but Gemini uses "{model}:{action}" in the same segment.
-		gemini.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
+		gemini.POST("/models/*modelAction", func(c *gin.Context) {
+			if rejectForeignOriginProtocol(c, originInboundGemini) {
+				return
+			}
+			h.Gateway.GeminiV1BetaModels(c)
+		})
 	}
 
 	// OpenAI Responses API（不带v1前缀的别名）— auto-route based on group platform
 	responsesHandler := func(c *gin.Context) {
+		if rejectForeignOriginProtocol(c, originInboundResponses) {
+			return
+		}
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.Responses(c)
 			return
@@ -515,6 +532,45 @@ func RegisterGatewayRoutes(
 		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
+}
+
+const (
+	originInboundMessages  = "messages"
+	originInboundChat      = "chat"
+	originInboundResponses = "responses"
+	originInboundGemini    = "gemini"
+)
+
+// originAPIRejection reports when the inbound protocol is not the upstream
+// origin API. Cross-protocol conversion rewrites tool calls and drops stream
+// events, so the client must call the origin endpoint directly.
+func originAPIRejection(platform, inbound string) string {
+	switch platform {
+	case service.PlatformOpenAI:
+		// OpenAI-compatible upstreams answer as Chat Completions. Gemini and
+		// Antigravity stay reachable from /v1/messages because clients such as
+		// ZCode only speak Anthropic or OpenAI, while the gateway already
+		// calls Gemini upstream in its own protocol.
+		if inbound != originInboundChat {
+			return "This model answers in the OpenAI Chat Completions API. Use POST /v1/chat/completions."
+		}
+	}
+	return ""
+}
+
+func rejectForeignOriginProtocol(c *gin.Context, inbound string) bool {
+	message := originAPIRejection(getGroupPlatform(c), inbound)
+	if message == "" {
+		return false
+	}
+	c.JSON(http.StatusBadRequest, gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    "invalid_request_error",
+			"message": message,
+		},
+	})
+	return true
 }
 
 func dispatchCodexModelsGateway(c *gin.Context, openAIHandler, generatedHandler gin.HandlerFunc) {
