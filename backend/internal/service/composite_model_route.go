@@ -63,6 +63,81 @@ type CompositeRoutePreviewRequest struct {
 	Endpoint string `json:"endpoint"`
 }
 
+// OpenAIMultiprotocolFamily describes one OpenAI-platform upstream family that
+// natively serves more than plain Chat Completions. Keys are exact model IDs
+// or prefixes (ending with "*"). This is the single source of truth consulted
+// by both the ingress gate and the forwarder; do NOT duplicate model lists
+// elsewhere.
+type OpenAIMultiprotocolFamily struct {
+	Name             string
+	MatchExact       map[string]struct{}
+	MatchPrefix      []string
+	NativeMessages   bool
+	NativeResponses  bool
+	NativeChat       bool
+}
+
+// OpenAIMultiprotocolFamilies is the versioned registry of multiprotocol
+// OpenAI-platform upstreams. Verified live 2026-09-30:
+// StepFun Step Plan has native /messages, /responses and /chat/completions;
+// Flatt has native /messages and /chat/completions (no /responses).
+var OpenAIMultiprotocolFamilies = []OpenAIMultiprotocolFamily{
+	{
+		Name: "stepfun",
+		MatchExact: map[string]struct{}{
+			"step-5-preview":          {},
+			"stepfun-step-5-preview":  {},
+			"stepfun/step-5-preview":  {},
+		},
+		MatchPrefix:     []string{"step-", "stepfun", "stepfun/"},
+		NativeMessages:  true,
+		NativeResponses: true,
+		NativeChat:      true,
+	},
+	{
+		Name: "flatt",
+		MatchExact: map[string]struct{}{
+			"glm-5.3-flash":              {},
+			"glm53flash":                 {},
+			"qwen3.8-27b":                {},
+			"deepseek-v4.1-flash":        {},
+			"muse-spark-1.3":             {},
+			"betallm-glm53flash":         {},
+			"betallm-qwen3.8-27b":        {},
+			"betallm-deepseek-v4.1-flash": {},
+			"betallm-muse-spark-1.3":     {},
+		},
+		MatchPrefix:     []string{"betallm-"},
+		NativeMessages:  true,
+		NativeResponses: false,
+		NativeChat:      true,
+	},
+}
+
+// MatchOpenAIMultiprotocolFamily returns the multiprotocol family for a public
+// or upstream model ID, normalizing case, whitespace and vendor/ prefixes.
+func MatchOpenAIMultiprotocolFamily(model string) *OpenAIMultiprotocolFamily {
+	clean := strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(clean, "/"); slash >= 0 {
+		clean = strings.TrimSpace(clean[slash+1:])
+	}
+	if clean == "" {
+		return nil
+	}
+	for i := range OpenAIMultiprotocolFamilies {
+		fam := &OpenAIMultiprotocolFamilies[i]
+		if _, ok := fam.MatchExact[clean]; ok {
+			return fam
+		}
+		for _, prefix := range fam.MatchPrefix {
+			if strings.HasPrefix(clean, prefix) {
+				return fam
+			}
+		}
+	}
+	return nil
+}
+
 type CompositeRouteDecision struct {
 	Matched        bool                 `json:"matched"`
 	Source         string               `json:"source"`

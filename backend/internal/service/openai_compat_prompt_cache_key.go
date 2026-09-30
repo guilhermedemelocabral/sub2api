@@ -15,7 +15,7 @@ const compatPromptCacheKeyPrefix = "compat_cc_"
 func shouldAutoInjectPromptCacheKeyForCompat(model string) bool {
 	trimmed := strings.TrimSpace(strings.ToLower(model))
 	canonical := canonicalizeOpenAIModelAliasSpelling(trimmed)
-	// GPT-6 Sol/Luna share the supported Responses cache identity contract.
+	// GPT-6 Sol/Luna and GPT-6.1 Sol share the supported Responses cache identity contract.
 	if canonical == "gpt-6" || canonical == "gpt-6-astra" || openai.IsGPT6SolOrLunaModelSpelling(canonical) || openai.IsGPT61SolModelSpelling(canonical) {
 		return true
 	}

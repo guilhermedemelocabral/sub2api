@@ -28,6 +28,10 @@ type StreamingProcessor struct {
 	messageStartSent  bool
 	messageStopSent   bool
 	usedTool          bool
+	hasEmittedText    bool
+	wasHealed         bool
+	lastFinishReason  string
+	healedFinishReason string
 	pendingSignature  string
 	trailingSignature string
 	originalModel     string
@@ -54,6 +58,19 @@ func NewStreamingProcessor(originalModel string) *StreamingProcessor {
 // SetUsageMapHook sets an optional hook that modifies usage maps before they are emitted.
 func (p *StreamingProcessor) SetUsageMapHook(fn UsageMapHook) {
 	p.usageMapHook = fn
+}
+
+// WasHealed reports whether this stream had to inject synthetic visible content
+// to prevent empty turn issues on clients like Grok Build / Hermes.
+func (p *StreamingProcessor) WasHealed() bool {
+	return p.wasHealed
+}
+
+// HealedWithEmptyReason reports whether the healing happened with no upstream
+// finish reason recorded. High prevalence of this case signals an upstream
+// anomaly worth investigating instead of silently normalizing.
+func (p *StreamingProcessor) HealedWithEmptyReason() bool {
+	return p.wasHealed && strings.TrimSpace(p.healedFinishReason) == ""
 }
 
 func usageToMap(u ClaudeUsage) map[string]any {
@@ -141,6 +158,7 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 			}
 		}
 		if finishReason != "" {
+			p.lastFinishReason = finishReason
 			_, _ = result.Write(p.emitFinish(finishReason))
 		}
 	}
@@ -165,7 +183,7 @@ func (p *StreamingProcessor) Finish() ([]byte, *ClaudeUsage) {
 
 	var result bytes.Buffer
 	if !p.messageStopSent {
-		_, _ = result.Write(p.emitFinish(""))
+		_, _ = result.Write(p.emitFinish(p.lastFinishReason))
 	}
 
 	return result.Bytes(), usage
@@ -328,6 +346,8 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 		return nil
 	}
 
+	p.hasEmittedText = true
+
 	// 处理之前的 trailingSignature
 	if p.trailingSignature != "" {
 		_, _ = result.Write(p.endBlock())
@@ -489,6 +509,39 @@ func (p *StreamingProcessor) emitEmptyThinkingWithSignature(signature string) []
 	return result.Bytes()
 }
 
+// IsHealableConversationalTurn reports whether an empty turn with the given
+// upstream finish reason may receive synthetic visible text. Benign
+// conversational endings only. Tool errors, safety blocks, token limits and
+// unknown reasons fail fast at the gateway level.
+func IsHealableConversationalTurn(finishReason string) bool {
+	switch NormalizeFinishReason(finishReason) {
+	case "", "STOP", "END_TURN":
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeFinishReason canonicalizes upstream finish reasons across
+// providers (Gemini/Antigravity emit UPPER, OpenAI/Anthropic emit lower).
+func NormalizeFinishReason(finishReason string) string {
+	return strings.ToUpper(strings.TrimSpace(finishReason))
+}
+
+// IsUpstreamSafetyRefusal reports whether the finish reason is a content
+// safety/censorship refusal. Such turns must propagate as-is without retry
+// (retrying with account rotation would bypass content filters) and must
+// never receive synthetic healing text.
+func IsUpstreamSafetyRefusal(finishReason string) bool {
+	switch NormalizeFinishReason(finishReason) {
+	case "SAFETY", "CONTENT_FILTER", "REFUSAL", "BLOCKLIST", "RECITATION",
+		"POLICY_VIOLATION", "HARM_BLOCKLIST", "PROHIBITED_CONTENT":
+		return true
+	default:
+		return false
+	}
+}
+
 // emitFinish 发送结束事件
 func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	var result bytes.Buffer
@@ -516,15 +569,42 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 				"text": groundingText,
 			}))
 			_, _ = result.Write(p.endBlock())
+			p.hasEmittedText = true
 		}
+	}
+
+	// Auto-healing: ensure clients like Grok Build / Hermes never receive an empty
+	// content: [] turn which causes silent 15x retry loops (no_visible_content).
+	// Allowlist: heal ONLY benign conversational endings. Tool errors, safety
+	// blocks and unknown reasons fail fast at the gateway level, NEVER as
+	// synthetic user-facing text.
+	if !p.usedTool && !p.hasEmittedText && IsHealableConversationalTurn(finishReason) {
+		p.wasHealed = true
+		p.healedFinishReason = finishReason
+		fallbackText := "[gateway: turno sem saída visível após thinking - continuando]"
+		_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
+			"type": "text",
+			"text": "",
+		}))
+		_, _ = result.Write(p.emitDelta("text_delta", map[string]any{
+			"text": fallbackText,
+		}))
+		_, _ = result.Write(p.endBlock())
+		p.hasEmittedText = true
 	}
 
 	// 确定 stop_reason
 	stopReason := "end_turn"
 	if p.usedTool {
 		stopReason = "tool_use"
-	} else if finishReason == "MAX_TOKENS" {
-		stopReason = "max_tokens"
+	} else {
+		switch NormalizeFinishReason(finishReason) {
+		case "MAX_TOKENS":
+			stopReason = "max_tokens"
+		case "SAFETY", "CONTENT_FILTER", "REFUSAL", "BLOCKLIST", "RECITATION",
+			"POLICY_VIOLATION", "HARM_BLOCKLIST", "PROHIBITED_CONTENT":
+			stopReason = "refusal"
+		}
 	}
 
 	usage := ClaudeUsage{
@@ -551,6 +631,17 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	}
 
 	_, _ = result.Write(p.formatSSE("message_delta", deltaEvent))
+
+	// In-band observability: headers cannot be set after the first SSE flush,
+	// so healed turns are signaled inline for programmatic detection.
+	if p.wasHealed {
+		healedEvent := map[string]any{
+			"type": "gateway_healed",
+			"gateway_healed": true,
+			"reason": "empty_turn_synthetic_text_injected",
+		}
+		_, _ = result.Write(p.formatSSE("gateway_healed", healedEvent))
+	}
 
 	if !p.messageStopSent {
 		stopEvent := map[string]any{

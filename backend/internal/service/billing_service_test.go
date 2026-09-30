@@ -2172,6 +2172,7 @@ func TestNewModelPricingChannelOverridesAndFamilyIsolation(t *testing.T) {
 	prices, err = svc.GetModelPricing("gpt-6")
 	require.NoError(t, err)
 	require.Equal(t, 10e-6, prices.InputPricePerToken)
+	require.Equal(t, "gpt-6.1-sol", normalizeKnownOpenAICodexModel("openai/gpt-6.1-sol-max"))
 	require.Equal(t, "gpt-6-sol", normalizeKnownOpenAICodexModel("openai/gpt-6-sol-max"))
 	require.Equal(t, "gpt-6-luna", normalizeKnownOpenAICodexModel("gpt-6-luna-openai-compact"))
 }

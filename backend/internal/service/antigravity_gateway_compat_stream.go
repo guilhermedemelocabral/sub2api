@@ -247,6 +247,12 @@ func isMeaningfulAntigravityCompatEvent(event *apicompat.AnthropicStreamEvent) b
 	if event == nil {
 		return false
 	}
+	if event.Type == "message_stop" {
+		return true
+	}
+	if event.Type == "gateway_healed" {
+		return true
+	}
 	if event.ContentBlock != nil {
 		block := event.ContentBlock
 		return block.Type == "tool_use" ||
@@ -347,6 +353,14 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				if !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
 				}
+				if session.processor.WasHealed() {
+					c.Header("X-Gateway-Healed", "true")
+					if session.processor.HealedWithEmptyReason() {
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s, empty_reason) for model %s: upstream gave no finish reason", prefix, originalModel)
+					} else {
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s) for model %s: injected synthetic visible content", prefix, originalModel)
+					}
+				}
 				return session.finish()
 			}
 			if event.err != nil {
@@ -354,6 +368,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
+			if reason := antigravityFinishReasonOfLine(event.line); antigravity.IsUpstreamSafetyRefusal(reason) {
+				return nil, UpstreamSafetyRefusalError(originalModel, reason)
+			}
 			if isAntigravityMalformedFunctionCallLine(event.line) {
 				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
 					return nil, retryErr

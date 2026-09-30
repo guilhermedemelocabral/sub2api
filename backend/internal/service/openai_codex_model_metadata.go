@@ -6,6 +6,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"net/url"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
 var codexToolCapabilityFields = []string{
@@ -88,6 +90,9 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 		target := modelID
 		if isOpenAIGPT6AstraModel(target) {
 			target = "gpt-6-astra"
+		}
+		if openai.IsGPT61SolModelSpelling(target) {
+			target = "gpt-6.1-sol"
 		}
 		_, disabled := apiKeyCodexModelsWithoutResponsesLite[target]
 		if disabled && bytes.Equal(capabilities["use_responses_lite"], []byte("true")) {

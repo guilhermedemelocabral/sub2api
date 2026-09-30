@@ -70,6 +70,11 @@ const openAI403HTMLBody = "<!DOCTYPE html>\n<html><head><title>403 Forbidden</ti
 
 const openAI403Cloudflare1010Body = "error code: 1010\n"
 
+// Flatt's Cloudflare custom error page is JSON, not the plaintext "error code: 1010".
+// The numeric code and error_name are the stable markers; the detector must not
+// require the plaintext phrasing or a burst of these 403s disables the account.
+const openAI403Cloudflare1010JSONBody = `{"type":"https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/","title":"Error 1010: Access denied","status":403,"detail":"The site owner has blocked access based on your browser's signature.","error_code":1010,"error_name":"browser_signature_banned","cloudflare_error":true,"what_you_should_do":"Do not retry. Your user-agent has been banned by the site owner."}`
+
 func TestHandleUpstreamError_OpenAIHTML403DoesNotPenalizeAccount(t *testing.T) {
 	cases := []struct {
 		name string
@@ -128,6 +133,98 @@ func TestHandleUpstreamError_OpenAICloudflare1010DoesNotPenalizeAccount(t *testi
 			require.Empty(t, blocker.accounts)
 		})
 	}
+}
+
+func TestHandleUpstreamError_OpenAICloudflare1010JSONDoesNotPenalizeAccount(t *testing.T) {
+	h := newOpenAI403TestHarness(t, 602, int64(openAI403DisableThreshold), int64(openAI403DisableThreshold)+1)
+
+	for i := 0; i < openAI403DisableThreshold+1; i++ {
+		require.False(t, h.handle(openAI403Cloudflare1010JSONBody), "第 %d 次 JSON 1010 仍不得判定账号应下线", i+1)
+	}
+
+	h.requireNoAccountPenalty(t)
+}
+
+func flattAccount(id int64) *Account {
+	return &Account{
+		ID:       id,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://infer.flatt.com.br/v1",
+		},
+	}
+}
+
+func TestHandleUpstreamError_FlattStopsOnlyForRateLimit(t *testing.T) {
+	t.Run("json_1010_and_auth_403_do_not_penalize", func(t *testing.T) {
+		h := newOpenAI403TestHarness(t, 701, int64(openAI403DisableThreshold))
+		h.account = flattAccount(701)
+
+		require.False(t, h.handle(openAI403Cloudflare1010JSONBody))
+		require.False(t, h.handle(`{"error":{"message":"Your account is not authorized"}}`))
+		require.False(t, h.svc.HandleUpstreamError(context.Background(), h.account, http.StatusUnauthorized, http.Header{}, []byte(`{"error":{"message":"invalid api key"}}`)))
+		h.requireNoAccountPenalty(t)
+		require.Equal(t, 0, h.repo.rateLimitedCalls)
+	})
+
+	t.Run("429_still_rate_limits", func(t *testing.T) {
+		h := newOpenAI403TestHarness(t, 702)
+		h.account = flattAccount(702)
+
+		require.False(t, h.svc.HandleUpstreamError(
+			context.Background(),
+			h.account,
+			http.StatusTooManyRequests,
+			http.Header{},
+			[]byte(`{"error":{"message":"rate limit","type":"rate_limit_error"}}`),
+		))
+		require.Equal(t, 0, h.repo.setErrorCalls)
+		require.Equal(t, 0, h.repo.tempCalls)
+		require.Equal(t, 1, h.repo.rateLimitedCalls)
+		require.Equal(t, int64(702), h.repo.lastRateLimitedID)
+	})
+
+	t.Run("other_host_structured_403_still_penalizes", func(t *testing.T) {
+		h := newOpenAI403TestHarness(t, 703, 1)
+		h.account = &Account{
+			ID:       703,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Credentials: map[string]any{
+				"base_url": "https://api.openai.com/v1",
+			},
+		}
+
+		require.True(t, h.handle(`{"error":{"message":"Your account is not authorized"}}`))
+		require.Equal(t, 1, h.repo.tempCalls)
+		require.Equal(t, 0, h.repo.setErrorCalls)
+	})
+}
+
+func TestHandleOpenAIAccountUpstreamError_Flatt403DoesNotDisable(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	counter := &countingOpenAI403CounterCache{
+		openAI403CounterCacheStub: openAI403CounterCacheStub{counts: []int64{openAI403DisableThreshold}},
+	}
+	rateLimitSvc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	rateLimitSvc.SetOpenAI403CounterCache(counter)
+	gateway := &OpenAIGatewayService{rateLimitService: rateLimitSvc}
+	account := flattAccount(704)
+
+	shouldDisable := gateway.handleOpenAIAccountUpstreamError(
+		context.Background(),
+		account,
+		http.StatusForbidden,
+		http.Header{},
+		[]byte(openAI403Cloudflare1010JSONBody),
+		"glm-5.3-flash",
+	)
+
+	require.False(t, shouldDisable)
+	require.Equal(t, 0, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
+	require.Equal(t, 0, counter.increments)
 }
 
 // 对照不变式：真正的结构化 JSON 403 是账号级证据，处罚链路必须原样保留。

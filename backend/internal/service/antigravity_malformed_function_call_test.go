@@ -41,17 +41,15 @@ func TestAntigravityChatStream_MalformedBeforeOutputRetriesThenDelivers(t *testi
 		require.Nil(t, result, "attempt %d", attempt)
 		var failoverErr *UpstreamFailoverError
 		require.ErrorAs(t, err, &failoverErr)
-		require.True(t, failoverErr.RetryableOnSameAccount)
-		require.True(t, failoverErr.RequestScopedTransient, "a model-side malformed call must not unschedule the account")
-		require.Equal(t, 1, failoverErr.SameAccountRetryMax)
+		require.False(t, failoverErr.RetryableOnSameAccount, "malformed function call must rotate to a clean account in the pool")
 		require.False(t, c.Writer.Written())
 		require.Empty(t, recorder.Body.String())
 	}
 
+	// Past the retry budget, gateway returns an explicit 502 error instead of delivering an empty/corrupted payload
 	result, err := svc.handleChatCompletionsStreamingFromAntigravity(c, malformedStreamResponse(malformedGeminiLine), time.Now(), "gemini-3.8-flash-high", true)
-	require.NoError(t, err, "past the retry budget the upstream answer is delivered")
-	require.NotNil(t, result)
-	require.Contains(t, recorder.Body.String(), "data: [DONE]")
+	require.Nil(t, result)
+	require.Error(t, err)
 }
 
 func TestAntigravityChatStream_MalformedAfterTextIsNotRetried(t *testing.T) {

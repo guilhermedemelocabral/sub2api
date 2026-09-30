@@ -114,6 +114,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// accounts never forward the body unchanged to a Chat Completions endpoint.
 	isResponsesShape := !gjson.GetBytes(body, "messages").Exists() && gjson.GetBytes(body, "input").Exists()
 
+	// step-5-preview only exists on the Chat Completions endpoint. Do not
+	// rebuild the request as Responses.
+	if IsStepFunChatCompletionsModel(gjson.GetBytes(body, "model").String()) || IsStepFunChatCompletionsModel(resolveOpenCodeGoMappedModel(account, body, defaultMappedModel)) {
+		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+	}
+
 	// OpenCode Go：按模型原生协议分流（与 inbound 协议正交）。
 	// 规则未命中一律兜底 Chat Completions，只有显式 Responses 才走下方转换链。
 	if account.IsOpenCodeGo() {
