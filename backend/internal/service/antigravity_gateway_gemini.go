@@ -86,8 +86,8 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
 	}
 
-	// 裸模型名（gemini-3.8-flash）按 thinkingConfig 解析到 -low/-medium/-high 变体；
-	// 裸名有显式映射时保持原行为。
+	// Gemini 3.8 Flash 一律改写为 gemini-3.8-flash-high。
+	// 其它裸 Gemini 名仍按 thinkingConfig 解析到 -low/-medium/-high。
 	mappedModel := s.getMappedModelForThinkingLevel(account, originalModel, geminiThinkingLevelFromBody(body))
 	if mappedModel != "" && mappedModel != originalModel {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s mapped Gemini model %s to %s", prefix, originalModel, mappedModel)

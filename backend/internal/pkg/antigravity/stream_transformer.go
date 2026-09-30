@@ -32,6 +32,9 @@ type StreamingProcessor struct {
 	wasHealed          bool
 	lastFinishReason   string
 	healedFinishReason string
+	thoughtChars       int
+	visibleTextChars   int
+	toolCallCount      int
 	pendingSignature   string
 	trailingSignature  string
 	originalModel      string
@@ -70,6 +73,11 @@ func (p *StreamingProcessor) WasHealed() bool {
 // anomaly worth investigating instead of silently normalizing.
 func (p *StreamingProcessor) HealedWithEmptyReason() bool {
 	return p.wasHealed && strings.TrimSpace(p.healedFinishReason) == ""
+}
+
+// HealStats snapshots turn-content counters for heal-line telemetry.
+func (p *StreamingProcessor) HealStats() (thoughtChars, visibleChars, toolCalls int, healedReason string) {
+	return p.thoughtChars, p.visibleTextChars, p.toolCallCount, p.healedFinishReason
 }
 
 func usageToMap(u ClaudeUsage) map[string]any {
@@ -317,6 +325,7 @@ func (p *StreamingProcessor) processThinking(text, signature string) []byte {
 		_, _ = result.Write(p.emitDelta("thinking_delta", map[string]any{
 			"thinking": text,
 		}))
+		p.thoughtChars += len(text)
 	}
 
 	// 暂存签名
@@ -340,6 +349,7 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 	}
 
 	p.hasEmittedText = true
+	p.visibleTextChars += len(text)
 
 	// 处理之前的 trailingSignature
 	if p.trailingSignature != "" {
@@ -382,6 +392,7 @@ func (p *StreamingProcessor) processFunctionCall(fc *GeminiFunctionCall, signatu
 	var result bytes.Buffer
 
 	p.usedTool = true
+	p.toolCallCount++
 
 	toolID := fc.ID
 	if toolID == "" {

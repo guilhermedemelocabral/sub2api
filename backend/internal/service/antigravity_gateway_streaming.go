@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -967,11 +968,31 @@ returnResponse:
 		return nil, nil, fmt.Errorf("failed to marshal gemini response: %w", err)
 	}
 
-	// 转换 Gemini 响应为 Claude 格式
-	claudeResp, agUsage, err := antigravity.TransformGeminiToClaude(geminiBody, originalModel)
-	if err != nil {
-		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] transform_error error=%v body=%s", err, string(geminiBody))
-		return nil, nil, fmt.Errorf("failed to parse upstream response: %w", err)
+	// 转换 Gemini 响应为 Claude 格式（保留 processor para telemetria de heal）
+	var v1Resp antigravity.V1InternalResponse
+	if uerr := json.Unmarshal(geminiBody, &v1Resp); uerr != nil || len(v1Resp.Response.Candidates) == 0 {
+		var directResp antigravity.GeminiResponse
+		if derr := json.Unmarshal(geminiBody, &directResp); derr != nil {
+			logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] transform_error error=%v body=%s", derr, string(geminiBody))
+			return nil, nil, fmt.Errorf("failed to parse upstream response: %w", derr)
+		}
+		v1Resp.Response = directResp
+	}
+	nsProcessor := antigravity.NewNonStreamingProcessor()
+	claudeObj := nsProcessor.Process(&v1Resp.Response, v1Resp.ResponseID, originalModel)
+	claudeResp, merr := json.Marshal(claudeObj)
+	if merr != nil {
+		return nil, nil, fmt.Errorf("failed to marshal claude response: %w", merr)
+	}
+	agUsage := &claudeObj.Usage
+	if nsProcessor.WasHealed() {
+		thoughtChars, visibleChars, toolCalls, healedReason := nsProcessor.HealStats()
+		reqID, clientReqID := healRequestIDs(c)
+		if strings.TrimSpace(healedReason) == "" {
+			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream, empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
+		} else {
+			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream) request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
+		}
 	}
 
 	// 转换为 service.ClaudeUsage
@@ -992,7 +1013,6 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
 	if bytes.Contains(claudeResp, []byte(`"_gateway_healed":true`)) {
 		c.Header("X-Gateway-Healed", "true")
-		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream) for model %s: injected synthetic visible content", originalModel)
 	}
 	if err != nil {
 		var failoverErr *UpstreamFailoverError
@@ -1146,10 +1166,12 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				finalEvents, agUsage := processor.Finish()
 				if processor.WasHealed() {
 					c.Header("X-Gateway-Healed", "true")
+					thoughtChars, visibleChars, toolCalls, healedReason := processor.HealStats()
+					reqID, clientReqID := healRequestIDs(c)
 					if processor.HealedWithEmptyReason() {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (empty_reason) for model %s: upstream gave no finish reason", originalModel)
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
 					} else {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn for model %s: injected synthetic visible content", originalModel)
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
 					}
 				}
 				if len(finalEvents) > 0 {
@@ -1266,4 +1288,19 @@ func isImageGenerationModel(model string) bool {
 		modelLower == "gemini-2.5-flash-image" ||
 		modelLower == "gemini-2.5-flash-image-preview" ||
 		strings.HasPrefix(modelLower, "gemini-2.5-flash-image-")
+}
+
+// healRequestIDs extracts gateway correlation IDs for heal-line telemetry.
+func healRequestIDs(c *gin.Context) (requestID, clientRequestID string) {
+	if c == nil || c.Request == nil {
+		return "", ""
+	}
+	ctx := c.Request.Context()
+	if v, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(v) != "" {
+		requestID = strings.TrimSpace(v)
+	}
+	if v, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(v) != "" {
+		clientRequestID = strings.TrimSpace(v)
+	}
+	return requestID, clientRequestID
 }

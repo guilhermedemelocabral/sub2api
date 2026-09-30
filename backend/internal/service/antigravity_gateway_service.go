@@ -297,12 +297,38 @@ func (s *AntigravityGatewayService) getMappedModel(account *Account, requestedMo
 	return s.getMappedModelForThinkingLevel(account, requestedModel, "")
 }
 
+// gemini38FlashWireModel is the only Gemini 3.8 Flash ID the Antigravity
+// catalog accepts for this deployment. Bare, low, medium, and tiered aliases
+// all leave through this one wire name.
+const gemini38FlashWireModel = "gemini-3.8-flash-high"
+
+// gemini38FlashWireModelFor reports the outbound model when the request is any
+// Gemini 3.8 Flash alias. Thinking level is ignored: this pool always uses high.
+func gemini38FlashWireModelFor(requestedModel string) (string, bool) {
+	model := strings.ToLower(strings.TrimSpace(requestedModel))
+	model = strings.TrimPrefix(model, "models/")
+	switch model {
+	case "gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered":
+		return gemini38FlashWireModel, true
+	default:
+		return "", false
+	}
+}
+
 // getMappedModelForThinkingLevel 在常规映射之前先把裸 Gemini 模型名
 // （gemini-3.x-flash）解析到上游目录里真实存在的 -low/-medium/-high/-tiered 变体。
 // Antigravity 目录只登记带后缀的变体，裸名直接转发会被上游以
 // 404 "Requested entity was not found." 拒绝，因此所有转发入口都必须经过这一步。
+// Gemini 3.8 Flash 例外：裸名、-low、-medium、-tiered 一律改写为 gemini-3.8-flash-high。
 // thinkingLevel 为空时按 high 兜底；调用方可按自身协议传入推导出的档位。
 func (s *AntigravityGatewayService) getMappedModelForThinkingLevel(account *Account, requestedModel string, thinkingLevel string) string {
+	if wire, ok := gemini38FlashWireModelFor(requestedModel); ok {
+		return wire
+	}
 	if mapped, ok := resolveGeminiThinkingVariantForLevel(account, requestedModel, thinkingLevel); ok {
 		return mapped
 	}
