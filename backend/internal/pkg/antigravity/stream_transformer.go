@@ -632,6 +632,12 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 		case "SAFETY", "CONTENT_FILTER", "REFUSAL", "BLOCKLIST", "RECITATION",
 			"POLICY_VIOLATION", "HARM_BLOCKLIST", "PROHIBITED_CONTENT":
 			stopReason = "refusal"
+		case "MALFORMED_FUNCTION_CALL":
+			// A corrupt tool-call tail must never look like a clean finish.
+			// The gateway emits an in-band error before reaching here; keep
+			// the belt-and-suspenders mapping so any path that does emit a
+			// finish still signals failure instead of end_turn.
+			stopReason = "error"
 		}
 	}
 

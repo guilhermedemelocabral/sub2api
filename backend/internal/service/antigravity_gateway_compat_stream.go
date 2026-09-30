@@ -328,6 +328,14 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStream(
 				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
 					return nil, retryErr
 				}
+				// Headers flushed (partial output already sent): never let the
+				// corrupt tail masquerade as a clean finish. Abort with an
+				// in-band stream error, like the safety-refusal path above.
+				if c.Writer.Written() {
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] MALFORMED_FUNCTION_CALL mid-stream (compat %s) for model %s: aborting with stream error", prefix, originalModel)
+					writeAntigravityCompatStreamError(c, adapter, session.writer, "malformed_function_call")
+					return session.collectResult(false), fmt.Errorf("upstream malformed function call")
+				}
 			}
 			session.consume(event.line)
 
