@@ -191,10 +191,10 @@ func TestGetMappedModelResolvesBareGeminiModelForAllEntrypoints(t *testing.T) {
 		require.Equal(t, "gemini-3.8-flash-high", svc.getMappedModel(account, "gemini-3.8-flash"))
 	})
 
-	t.Run("caller supplied level wins", func(t *testing.T) {
-		require.Equal(t, "gemini-3.8-flash-low",
+	t.Run("3.8 flash ignores thinking level and stays on high", func(t *testing.T) {
+		require.Equal(t, "gemini-3.8-flash-high",
 			svc.getMappedModelForThinkingLevel(account, "gemini-3.8-flash", "low"))
-		require.Equal(t, "gemini-3.8-flash-medium",
+		require.Equal(t, "gemini-3.8-flash-high",
 			svc.getMappedModelForThinkingLevel(account, "gemini-3.8-flash", "medium"))
 	})
 
@@ -202,8 +202,24 @@ func TestGetMappedModelResolvesBareGeminiModelForAllEntrypoints(t *testing.T) {
 		require.Equal(t, "gemini-3.8-flash-high", svc.getMappedModel(account, "models/gemini-3.8-flash"))
 	})
 
-	t.Run("suffixed model keeps normal mapping", func(t *testing.T) {
-		require.Equal(t, "gemini-3.8-flash-low", svc.getMappedModel(account, "gemini-3.8-flash-low"))
+	t.Run("every 3.8 flash alias leaves as high", func(t *testing.T) {
+		for _, requested := range []string{
+			"gemini-3.8-flash",
+			"gemini-3.8-flash-low",
+			"gemini-3.8-flash-medium",
+			"gemini-3.8-flash-tiered",
+			"gemini-3.8-flash-high",
+			"models/gemini-3.8-flash-low",
+		} {
+			require.Equal(t, "gemini-3.8-flash-high", svc.getMappedModel(account, requested), requested)
+		}
+	})
+
+	t.Run("saved identity mapping still leaves as high", func(t *testing.T) {
+		pinned := newAntigravityAccountWithMapping(map[string]string{
+			"gemini-3.8-flash": "gemini-3.8-flash",
+		})
+		require.Equal(t, "gemini-3.8-flash-high", svc.getMappedModel(pinned, "gemini-3.8-flash"))
 	})
 
 	t.Run("unsupported model still reports unsupported", func(t *testing.T) {

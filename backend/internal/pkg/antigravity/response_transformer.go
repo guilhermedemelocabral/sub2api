@@ -49,20 +49,36 @@ func TransformGeminiToClaude(geminiResp []byte, originalModel string) ([]byte, *
 
 // NonStreamingProcessor 非流式响应处理器
 type NonStreamingProcessor struct {
-	contentBlocks     []ClaudeContentItem
-	textBuilder       string
-	thinkingBuilder   string
-	thinkingSignature string
-	trailingSignature string
-	hasToolCall       bool
-	wasHealed         bool
+	contentBlocks      []ClaudeContentItem
+	textBuilder        string
+	thinkingBuilder    string
+	thinkingSignature  string
+	trailingSignature  string
+	hasToolCall        bool
+	wasHealed          bool
+	healedFinishReason string
+	thoughtChars       int
+	visibleTextChars   int
+	toolCallCount      int
 }
 
 func (p *NonStreamingProcessor) WasHealed() bool {
 	return p.wasHealed
 }
 
+// HealStats snapshots turn-content counters for heal-line telemetry.
+func (p *NonStreamingProcessor) HealStats() (thoughtChars, visibleChars, toolCalls int, healedReason string) {
+	return p.thoughtChars, p.visibleTextChars, p.toolCallCount, p.healedFinishReason
+}
+
 // NewNonStreamingProcessor 创建非流式响应处理器
+// ConvertGeminiToClaude runs the non-streaming conversion and returns the
+// processor alongside the response so callers can read heal telemetry.
+func ConvertGeminiToClaude(geminiResp *GeminiResponse, responseID, originalModel string) (*ClaudeResponse, *NonStreamingProcessor) {
+	processor := NewNonStreamingProcessor()
+	return processor.Process(geminiResp, responseID, originalModel), processor
+}
+
 func NewNonStreamingProcessor() *NonStreamingProcessor {
 	return &NonStreamingProcessor{
 		contentBlocks: make([]ClaudeContentItem, 0),
@@ -125,6 +141,7 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 		}
 
 		p.hasToolCall = true
+		p.toolCallCount++
 
 		// 生成 tool_use id
 		toolID := part.FunctionCall.ID
@@ -165,6 +182,7 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 			}
 
 			p.thinkingBuilder += part.Text
+			p.thoughtChars += len(part.Text)
 			if signature != "" {
 				p.thinkingSignature = signature
 			}
@@ -193,6 +211,7 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 
 			// 非空 text 带签名 - 特殊处理：先输出 text，再输出空 thinking 块
 			if signature != "" {
+				p.visibleTextChars += len(part.Text)
 				p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
 					Type: "text",
 					Text: part.Text,
@@ -237,6 +256,7 @@ func (p *NonStreamingProcessor) flushText() {
 		return
 	}
 
+	p.visibleTextChars += len(p.textBuilder)
 	p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
 		Type: "text",
 		Text: p.textBuilder,
@@ -287,6 +307,7 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 	// user-facing text.
 	if !hasVisible && IsHealableConversationalTurn(finishReason) {
 		p.wasHealed = true
+		p.healedFinishReason = finishReason
 		fallbackText := "[gateway: turno sem saída visível após thinking - continuando]"
 		p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
 			Type: "text",

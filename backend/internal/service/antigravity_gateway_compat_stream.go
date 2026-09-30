@@ -355,10 +355,12 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				}
 				if session.processor.WasHealed() {
 					c.Header("X-Gateway-Healed", "true")
+					thoughtChars, visibleChars, toolCalls, healedReason := session.processor.HealStats()
+					reqID, clientReqID := healRequestIDs(c)
 					if session.processor.HealedWithEmptyReason() {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s, empty_reason) for model %s: upstream gave no finish reason", prefix, originalModel)
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s, empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", prefix, reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
 					} else {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s) for model %s: injected synthetic visible content", prefix, originalModel)
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s) request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", prefix, reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
 					}
 				}
 				return session.finish()
