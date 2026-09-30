@@ -33,6 +33,36 @@ func TestDefaultModelsIncludeGPTImage25(t *testing.T) {
 	require.Contains(t, DefaultModelIDs(), "gpt-image-2.5-sunburst")
 }
 
+func TestGPT61SolModelIdentity(t *testing.T) {
+	require.Contains(t, DefaultModelIDs(), "gpt-6.1-sol")
+	var displayName string
+	for _, model := range DefaultModels {
+		if model.ID == "gpt-6.1-sol" {
+			displayName = model.DisplayName
+			break
+		}
+	}
+	require.Equal(t, "GPT-6.1-Sol", displayName)
+	for _, model := range []string{
+		"gpt-6.1-sol",
+		"openai/gpt-6.1-sol",
+		"GPT-6.1 Sol",
+		"gpt6.1sol",
+		"gpt-6.1sol-max",
+		"gpt-6.1-sol-2026-09-29",
+		"gpt-6.1-sol-openai-compact",
+	} {
+		require.True(t, IsGPT61SolModelSpelling(model), model)
+	}
+	for _, model := range []string{"gpt-6.1", "gpt-6-sol", "gpt-6.1-solitude", "gpt-6.1-sol-preview", "gpt-6-astra"} {
+		require.False(t, IsGPT61SolModelSpelling(model), model)
+	}
+	require.True(t, IsGPT61SolUnsupportedReasoningEffort("none"))
+	require.True(t, IsGPT61SolUnsupportedReasoningEffort("minimal"))
+	require.False(t, IsGPT61SolUnsupportedReasoningEffort("max"))
+	require.Contains(t, CodexBaseInstructionsForModel("gpt-6.1-sol"), "You are Codex, an agent based on GPT-6.")
+}
+
 func TestGPT6SolLunaModelIdentity(t *testing.T) {
 	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
 		require.Contains(t, DefaultModelIDs(), model)

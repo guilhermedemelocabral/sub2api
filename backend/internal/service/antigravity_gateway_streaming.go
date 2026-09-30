@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -989,6 +990,10 @@ returnResponse:
 // 用于处理客户端非流式请求但上游只支持流式的情况
 func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+	if bytes.Contains(claudeResp, []byte(`"_gateway_healed":true`)) {
+		c.Header("X-Gateway-Healed", "true")
+		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream) for model %s: injected synthetic visible content", originalModel)
+	}
 	if err != nil {
 		var failoverErr *UpstreamFailoverError
 		if errors.As(err, &failoverErr) {
@@ -1139,6 +1144,14 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			if !ok {
 				// 上游完成，发送结束事件
 				finalEvents, agUsage := processor.Finish()
+				if processor.WasHealed() {
+					c.Header("X-Gateway-Healed", "true")
+					if processor.HealedWithEmptyReason() {
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (empty_reason) for model %s: upstream gave no finish reason", originalModel)
+					} else {
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn for model %s: injected synthetic visible content", originalModel)
+					}
+				}
 				if len(finalEvents) > 0 {
 					cw.Write(finalEvents)
 				} else if !processor.MessageStartSent() && !cw.Disconnected() {
@@ -1168,6 +1181,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 			lastDataAt = time.Now()
 			s.observeAntigravityGeminiSSELine(c, ev.line)
+			if reason := antigravityFinishReasonOfLine(ev.line); antigravity.IsUpstreamSafetyRefusal(reason) {
+				return nil, UpstreamSafetyRefusalError(originalModel, reason)
+			}
 			if isAntigravityMalformedFunctionCallLine(ev.line) {
 				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
 					return nil, retryErr

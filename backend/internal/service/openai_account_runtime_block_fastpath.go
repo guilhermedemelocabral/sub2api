@@ -93,6 +93,16 @@ func isOpenAIAccount(account *Account) bool {
 // handleOpenAIAccountUpstreamError expects canonicalModel to be the model used
 // for scheduling after applying account mapping exactly once.
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, canonicalModel ...string) bool {
+	// Antes de qualquer SetError / cooldown de modelo: Flatt só para por rate limit.
+	if accountUpstreamStopsOnlyForRateLimit(account) && statusCode != http.StatusTooManyRequests {
+		if account != nil {
+			slog.Warn("flatt_upstream_keeps_account_schedulable",
+				"account_id", account.ID,
+				"status_code", statusCode,
+			)
+		}
+		return false
+	}
 	if account != nil && account.Platform == PlatformGrok && isGrokContentPolicyRejection(statusCode, responseBody) {
 		return false
 	}

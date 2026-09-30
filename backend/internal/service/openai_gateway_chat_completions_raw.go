@@ -81,6 +81,11 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		// anchored to the client's stable conversation prefix.
 		grokCacheIdentity = resolveGrokCacheIdentity(c, body, "", upstreamModel)
 	}
+	if openai.IsGPT61SolModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) {
+		err := fmt.Errorf("%s requires the Responses API for tool calls; Chat Completions does not support tools for this model", upstreamModel)
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return nil, err
+	}
 	if openai.IsGPT6SolOrLunaModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) && gjson.GetBytes(body, "reasoning_effort").String() != "none" {
 		err := fmt.Errorf("%s requires Responses for tool calls with reasoning; this account only supports Chat Completions. Use reasoning_effort=none or a Responses-capable account", upstreamModel)
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -93,6 +98,13 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	}
 	if normalizedBody, normalized := NormalizeGLMOpenAIReasoningEffort(upstreamBody, upstreamModel); normalized {
 		upstreamBody = normalizedBody
+	}
+	if openai.IsGPT61SolModelSpelling(upstreamModel) {
+		prepared, _, prepareErr := prepareGPT61SolResponsesBody(upstreamBody)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		upstreamBody = prepared
 	}
 
 	// 4. Apply OpenAI fast policy on the CC body

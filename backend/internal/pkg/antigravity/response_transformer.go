@@ -55,6 +55,11 @@ type NonStreamingProcessor struct {
 	thinkingSignature string
 	trailingSignature string
 	hasToolCall       bool
+	wasHealed         bool
+}
+
+func (p *NonStreamingProcessor) WasHealed() bool {
+	return p.wasHealed
 }
 
 // NewNonStreamingProcessor 创建非流式响应处理器
@@ -269,11 +274,37 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 		}
 	}
 
+	hasVisible := false
+	for _, block := range p.contentBlocks {
+		if block.Type == "text" || block.Type == "tool_use" {
+			hasVisible = true
+			break
+		}
+	}
+	// Heals ONLY benign conversational endings (see IsHealableConversationalTurn).
+	// Tool call formatting errors, safety blocks and unknown reasons are
+	// handled strictly at the gateway level via retry/502, NEVER as synthetic
+	// user-facing text.
+	if !hasVisible && IsHealableConversationalTurn(finishReason) {
+		p.wasHealed = true
+		fallbackText := "[gateway: turno sem saída visível após thinking - continuando]"
+		p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
+			Type: "text",
+			Text: fallbackText,
+		})
+	}
+
 	stopReason := "end_turn"
 	if p.hasToolCall {
 		stopReason = "tool_use"
-	} else if finishReason == "MAX_TOKENS" {
-		stopReason = "max_tokens"
+	} else {
+		switch NormalizeFinishReason(finishReason) {
+		case "MAX_TOKENS":
+			stopReason = "max_tokens"
+		case "SAFETY", "CONTENT_FILTER", "REFUSAL", "BLOCKLIST", "RECITATION",
+			"POLICY_VIOLATION", "HARM_BLOCKLIST", "PROHIBITED_CONTENT":
+			stopReason = "refusal"
+		}
 	}
 
 	// 注意：Gemini 的 promptTokenCount 包含 cachedContentTokenCount，
@@ -297,13 +328,14 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 	}
 
 	return &ClaudeResponse{
-		ID:         respID,
-		Type:       "message",
-		Role:       "assistant",
-		Model:      originalModel,
-		Content:    p.contentBlocks,
-		StopReason: stopReason,
-		Usage:      usage,
+		ID:            respID,
+		Type:          "message",
+		Role:          "assistant",
+		Model:         originalModel,
+		Content:       p.contentBlocks,
+		StopReason:    stopReason,
+		Usage:         usage,
+		GatewayHealed: p.wasHealed,
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -330,6 +331,15 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 // HandleUpstreamError 处理上游错误响应，标记账号状态
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+	// Flatt (infer.flatt.com.br) fica fora de rotação só por 429. 403 de borda
+	// (Cloudflare 1010), 401 transitório e 5xx não podem marcar a conta como error.
+	if accountUpstreamStopsOnlyForRateLimit(account) && statusCode != http.StatusTooManyRequests {
+		slog.Warn("flatt_upstream_keeps_account_schedulable",
+			"account_id", account.ID,
+			"status_code", statusCode,
+		)
+		return false
+	}
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	// Team 联动熔断必须先于池模式/自定义错误码/临时不可调度的各类早退；
 	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
@@ -1096,9 +1106,49 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 // isCloudflareBotBlockResponse reports Cloudflare's WAF bot-signature response
 // (error code 1010). The upstream never reached the account API, so this is a
 // request/edge-level failure and must not consume the account 403 strike budget.
+//
+// Cloudflare's default body is the plaintext "error code: 1010". Custom error
+// pages (Flatt) return JSON with error_code 1010 / browser_signature_banned
+// and a developers.cloudflare.com error-1010 URL. Both shapes are edge blocks.
 func isCloudflareBotBlockResponse(body []byte) bool {
 	normalized := strings.ToLower(strings.TrimSpace(string(body)))
-	return strings.Contains(normalized, "error code: 1010")
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "error code: 1010") || strings.Contains(normalized, "browser_signature_banned") {
+		return true
+	}
+	return strings.Contains(normalized, "cloudflare") && strings.Contains(normalized, "1010")
+}
+
+// accountUpstreamStopsOnlyForRateLimit reports upstreams that must stay
+// schedulable unless the upstream returns 429. Flatt's Cloudflare edge answers
+// 403/1010 for a banned client User-Agent; that is not an account failure.
+func accountUpstreamStopsOnlyForRateLimit(account *Account) bool {
+	return isFlattUpstreamAccount(account)
+}
+
+func isFlattUpstreamAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	return isFlattUpstreamBaseURL(account.GetOpenAIBaseURL())
+}
+
+func isFlattUpstreamBaseURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "flatt.com.br" || strings.HasSuffix(host, ".flatt.com.br")
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误

@@ -1333,7 +1333,11 @@ func normalizeOpenAIOAuthResponsesCompatibilityBody(body []byte) ([]byte, bool, 
 }
 
 func normalizeGPT6ResponsesSampling(body []byte, model string) ([]byte, bool, error) {
-	if !openai.IsGPT6SolOrLunaModelSpelling(model) || gjson.GetBytes(body, "reasoning.effort").String() == "none" {
+	solOrLuna := openai.IsGPT6SolOrLunaModelSpelling(model)
+	if !solOrLuna && !openai.IsGPT61SolModelSpelling(model) {
+		return body, false, nil
+	}
+	if solOrLuna && strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "reasoning.effort").String()), "none") {
 		return body, false, nil
 	}
 	out := body
@@ -1375,6 +1379,9 @@ func normalizeOpenAIResponsesReasoningMode(body []byte, model string) ([]byte, b
 	// established mode stripping and pro-to-max compatibility behavior.
 	if model == "" {
 		model = gjson.GetBytes(body, "model").String()
+	}
+	if openai.IsGPT61SolModelSpelling(model) {
+		return prepareGPT61SolResponsesBody(body)
 	}
 	if isOpenAIGPT6Model(model) {
 		return normalizeGPT6ResponsesSampling(body, model)
@@ -2543,7 +2550,48 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 	}
 }
 
+func prepareGPT61SolResponsesBody(body []byte) ([]byte, bool, error) {
+	updated, stripped, err := stripGPT61SolUnsupportedReasoningEffort(body)
+	if err != nil {
+		return body, false, err
+	}
+	sampled, samplingChanged, err := normalizeGPT6ResponsesSampling(updated, "gpt-6.1-sol")
+	if err != nil {
+		return body, false, err
+	}
+	return sampled, stripped || samplingChanged, nil
+}
+
+func stripGPT61SolUnsupportedReasoningEffort(body []byte) ([]byte, bool, error) {
+	out := body
+	changed := false
+	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+		effort := gjson.GetBytes(out, path)
+		if effort.Type != gjson.String || !openai.IsGPT61SolUnsupportedReasoningEffort(effort.String()) {
+			continue
+		}
+		next, err := sjson.DeleteBytes(out, path)
+		if err != nil {
+			return body, false, fmt.Errorf("strip GPT-6.1 Sol %s: %w", path, err)
+		}
+		out = next
+		changed = true
+	}
+	if reasoning := gjson.GetBytes(out, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+		next, err := sjson.DeleteBytes(out, "reasoning")
+		if err != nil {
+			return body, false, fmt.Errorf("strip empty GPT-6.1 Sol reasoning object: %w", err)
+		}
+		out = next
+		changed = true
+	}
+	return out, changed, nil
+}
+
 func normalizeOpenAIReasoningEffortForModel(raw, model string) string {
+	if openai.IsGPT61SolModelSpelling(model) && openai.IsGPT61SolUnsupportedReasoningEffort(raw) {
+		return ""
+	}
 	if strings.EqualFold(strings.TrimSpace(raw), "none") && openai.IsGPT6SolOrLunaModelSpelling(model) {
 		return "none"
 	}

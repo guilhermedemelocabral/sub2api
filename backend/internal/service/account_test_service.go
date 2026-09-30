@@ -2777,8 +2777,13 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 		payload["store"] = false
 	}
 
-	// All accounts require instructions for Responses API
+	// All accounts require instructions for Responses API.
+	// GPT-6.1 Sol keeps the GPT-6 Codex prompt; other probes stay on the
+	// historical default so existing connection tests do not change voice.
 	payload["instructions"] = openai.DefaultInstructions
+	if openai.IsGPT61SolModelSpelling(modelID) {
+		payload["instructions"] = openai.CodexBaseInstructionsForModel(modelID)
+	}
 
 	return payload
 }

@@ -507,17 +507,21 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		descriptor.ServiceTiers = configuredCodexServiceTiersForModel(modelID)
 		if isOpenAICodexReasoningGPTModel(modelID) {
 			defaultReasoningLevel := "medium"
-			if getNormalizedCodexModel(modelID) == "gpt-5.6-sol" {
+			if getNormalizedCodexModel(modelID) == "gpt-5.6-sol" || openai.IsGPT61SolModelSpelling(modelID) {
 				defaultReasoningLevel = "low"
 			}
 			descriptor.DefaultReasoningLevel = &defaultReasoningLevel
 			descriptor.SupportedReasoningLevels = configuredCodexGPTReasoningLevels(modelID)
 			descriptor.DefaultReasoningSummary = "none"
 			descriptor.TruncationPolicy = configuredCodexTruncationPolicy{Mode: "tokens", Limit: configuredCodexToolOutputMaxTokens}
-			// GPT-6 Sol/Luna retain the existing 5.6 Codex window as an offline
-			// compatibility template; live account metadata remains authoritative.
-			if isOpenAIGPT56Model(modelID) || openai.IsGPT6SolOrLunaModelSpelling(modelID) {
+			// GPT-6 Sol/Luna and GPT-6.1 Sol keep the Codex window from
+			// openai/codex models.json. The public API context is larger;
+			// live account metadata remains authoritative when present.
+			if isOpenAIGPT56Model(modelID) || openai.IsGPT6SolOrLunaModelSpelling(modelID) || openai.IsGPT61SolModelSpelling(modelID) {
 				descriptor.MaxContextWindow = configuredCodexGPT56MaxContext
+			}
+			if openai.IsGPT61SolModelSpelling(modelID) {
+				applyCodexGPT61SolDescriptor(&descriptor)
 			}
 			if isOpenAIGPT6AstraModel(modelID) {
 				// Codex resolves the Ultra workflow to this effort before inference.
@@ -621,6 +625,50 @@ func claudeCodexDefaultReasoningLevel(levels []configuredCodexReasoningLevel) st
 	return levels[0].Effort
 }
 
+// applyCodexGPT61SolDescriptor matches openai/codex models.json for gpt-6.1-sol.
+// ChatGPT Codex uses Responses Lite and code_mode_only; API-key manifests
+// clear Responses Lite later.
+func applyCodexGPT61SolDescriptor(descriptor *configuredCodexModelDescriptor) {
+	if descriptor == nil {
+		return
+	}
+	low := "low"
+	patchType := "freeform"
+	multiAgentEffort := "xhigh"
+	descriptor.DefaultReasoningLevel = &low
+	descriptor.SupportedReasoningLevels = []configuredCodexReasoningLevel{
+		{Effort: "low", Description: "Fast responses with lighter reasoning"},
+		{Effort: "medium", Description: "Balances speed and reasoning depth for everyday tasks"},
+		{Effort: "high", Description: "Greater reasoning depth for complex problems"},
+		{Effort: "xhigh", Description: "Extra high reasoning depth for complex problems"},
+		{Effort: "max", Description: "Maximum reasoning depth for the hardest problems"},
+		{Effort: "ultra", Description: "Maximum reasoning with automatic task delegation"},
+	}
+	descriptor.Description = "Latest workhorse model for coding and everyday work."
+	descriptor.ShellType = "shell_command"
+	descriptor.WebSearchToolType = "text_and_image"
+	descriptor.Priority = 1
+	descriptor.ApplyPatchToolType = &patchType
+	descriptor.SupportsImageDetailOriginal = true
+	descriptor.SupportsSearchTool = true
+	descriptor.InputModalities = []string{"text", "image"}
+	descriptor.UseResponsesLite = true
+	descriptor.ToolMode = "code_mode_only"
+	descriptor.CompHash = "3000"
+	descriptor.NodeREPLAutoReviewRequired = true
+	descriptor.AdditionalSpeedTiers = []string{"fast"}
+	descriptor.ContextWindow = configuredCodexFallbackContext
+	descriptor.MaxContextWindow = configuredCodexGPT56MaxContext
+	descriptor.MultiAgentReasoningEffort = &multiAgentEffort
+	descriptor.MultiAgentVersion = "v2"
+	descriptor.ExperimentalSupportedTools = []string{"send_user_message_async", "clock"}
+	descriptor.ServiceTiers = []configuredCodexServiceTier{{
+		ID:          OpenAIFastTierPriority,
+		Name:        "Fast",
+		Description: "2x speed, increased usage",
+	}}
+}
+
 func configuredCodexGPTReasoningLevels(modelID string) []configuredCodexReasoningLevel {
 	levels := []configuredCodexReasoningLevel{
 		{Effort: "low", Description: "Fast responses with lighter reasoning"},
@@ -635,7 +683,7 @@ func configuredCodexGPTReasoningLevels(modelID string) []configuredCodexReasonin
 			Description: "Maximum reasoning depth for complex tasks",
 		})
 	}
-	if isOpenAIGPT6AstraModel(modelID) || normalized == "gpt-5.6-sol" || normalized == "gpt-5.6-terra" {
+	if isOpenAIGPT6AstraModel(modelID) || openai.IsGPT61SolModelSpelling(modelID) || normalized == "gpt-5.6-sol" || normalized == "gpt-5.6-terra" {
 		levels = append(levels, configuredCodexReasoningLevel{
 			Effort:      "ultra",
 			Description: "Maximum reasoning with automatic task delegation",
@@ -965,7 +1013,9 @@ func buildCodexModelsManifest(
 		seen[modelID] = struct{}{}
 		descriptor := newConfiguredCodexModelDescriptor(metadataModelID)
 		descriptor.Slug = modelID
-		descriptor.SupportsSearchTool = searchToolModels[modelID]
+		descriptor.SupportsSearchTool = searchToolModels[modelID] ||
+			openai.IsGPT61SolModelSpelling(modelID) ||
+			openai.IsGPT61SolModelSpelling(metadataModelID)
 		if metadata, ok := modelMetadata[modelID]; ok {
 			applyUpstreamModelMetadataToCodexDescriptor(&descriptor, metadata)
 		}
@@ -2059,6 +2109,7 @@ func CodexModelsManifestETag(body []byte) string {
 }
 
 var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
+	"gpt-6.1-sol":   {},
 	"gpt-6-astra":   {},
 	"gpt-5.6-sol":   {},
 	"gpt-5.6-terra": {},
@@ -2095,6 +2146,9 @@ func adjustAPIKeyCodexModelsManifest(body []byte, account *Account) ([]byte, err
 		}
 		if isOpenAIGPT6AstraModel(target) {
 			target = "gpt-6-astra"
+		}
+		if openai.IsGPT61SolModelSpelling(target) {
+			target = "gpt-6.1-sol"
 		}
 		if _, targeted := apiKeyCodexModelsWithoutResponsesLite[target]; !targeted {
 			continue

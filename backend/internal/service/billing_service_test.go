@@ -2046,6 +2046,7 @@ func TestNewModelPricingCatalogFallbackAndContext(t *testing.T) {
 			model                      string
 			input, output, write, read float64
 		}{
+			{"gpt-6.1-sol", 2e-6, 10e-6, 2.5e-6, 0.1e-6},
 			{"gpt-6-sol", 2e-6, 10e-6, 2.5e-6, 0.2e-6},
 			{"gpt-6-luna", 0.1e-6, 0.5e-6, 0.125e-6, 0.01e-6},
 		} {
@@ -2105,6 +2106,7 @@ func TestNewModelPricingChannelOverridesAndFamilyIsolation(t *testing.T) {
 	prices, err = svc.GetModelPricing("gpt-6")
 	require.NoError(t, err)
 	require.Equal(t, 10e-6, prices.InputPricePerToken)
+	require.Equal(t, "gpt-6.1-sol", normalizeKnownOpenAICodexModel("openai/gpt-6.1-sol-max"))
 	require.Equal(t, "gpt-6-sol", normalizeKnownOpenAICodexModel("openai/gpt-6-sol-max"))
 	require.Equal(t, "gpt-6-luna", normalizeKnownOpenAICodexModel("gpt-6-luna-openai-compact"))
 }

@@ -166,7 +166,7 @@ func TestDeriveAnthropicCompatPromptCacheKey_UsesCacheControlAnchors(t *testing.
 }
 
 func TestGPT6SolLunaCompatCacheIdentity(t *testing.T) {
-	for _, model := range []string{"gpt-6-sol", "openai/gpt-6-luna", "gpt-6-sol-max"} {
+	for _, model := range []string{"gpt-6-sol", "openai/gpt-6-luna", "gpt-6-sol-max", "gpt-6.1-sol", "openai/gpt-6.1-sol-max"} {
 		require.True(t, shouldAutoInjectPromptCacheKeyForCompat(model), model)
 	}
 	for _, model := range []string{"gpt-6-sol-preview", "gpt-6-solitude", "gpt-6-luna-preview"} {

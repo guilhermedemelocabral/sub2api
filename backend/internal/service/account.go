@@ -1446,6 +1446,13 @@ func (a *Account) SupportsNativeCNResponses() bool {
 	case PlatformDeepseek, PlatformKimi, PlatformMiniMax, PlatformOpenCodeGo:
 		return true
 	default:
+		if a.Type == AccountTypeAPIKey && a.IsAdaptiveAPIProtocol() {
+			if baseURLs, ok := a.Credentials["api_base_urls"].(map[string]any); ok {
+				if rURL, ok := baseURLs[APIProtocolResponses].(string); ok && strings.TrimSpace(rURL) != "" {
+					return true
+				}
+			}
+		}
 		return false
 	}
 }

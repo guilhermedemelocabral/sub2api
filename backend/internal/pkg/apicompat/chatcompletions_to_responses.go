@@ -65,8 +65,9 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		out.MaxOutputTokens = &v
 	}
 
-	// reasoning_effort → reasoning.effort + reasoning.summary="auto"
-	if req.ReasoningEffort != "" {
+	// reasoning_effort → reasoning.effort + reasoning.summary="auto".
+	// GPT-6.1 Sol rejects none and minimal, so those local suffixes are omitted.
+	if req.ReasoningEffort != "" && !(openai.IsGPT61SolModelSpelling(req.Model) && openai.IsGPT61SolUnsupportedReasoningEffort(req.ReasoningEffort)) {
 		out.Reasoning = &ResponsesReasoning{
 			Effort:  req.ReasoningEffort,
 			Summary: "auto",

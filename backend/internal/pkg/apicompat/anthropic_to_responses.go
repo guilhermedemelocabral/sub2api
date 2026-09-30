@@ -484,7 +484,7 @@ func boolPtr(v bool) *bool {
 // All gpt-5.x models are reasoning-only; the Responses API returns
 // "Unsupported parameter: temperature" if these fields are present.
 func isReasoningModel(model string) bool {
-	return strings.HasPrefix(model, "gpt-5") || openai.IsGPT6SolOrLunaModelSpelling(model)
+	return strings.HasPrefix(model, "gpt-5") || openai.IsGPT6SolOrLunaModelSpelling(model) || openai.IsGPT61SolModelSpelling(model)
 }
 
 // normalizeToolParameters ensures the tool parameter schema is valid for

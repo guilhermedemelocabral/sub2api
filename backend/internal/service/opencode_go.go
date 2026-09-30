@@ -289,7 +289,21 @@ func (a *Account) openCodeDefaultAnthropicBaseURL() string {
 }
 
 func (a *Account) IsMultiProtocolAPIKey() bool {
-	return a != nil && IsMultiProtocolAPIKeyProvider(a.Platform)
+	if a == nil {
+		return false
+	}
+	if IsMultiProtocolAPIKeyProvider(a.Platform) {
+		return true
+	}
+	if a.Type == AccountTypeAPIKey {
+		if strings.EqualFold(strings.TrimSpace(a.GetCredential("api_protocol")), APIProtocolAdaptive) {
+			return true
+		}
+		if _, ok := a.Credentials["api_base_urls"].(map[string]any); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // openCodeGoNativeProtocol 返回 OpenCode Go 实际上游协议。

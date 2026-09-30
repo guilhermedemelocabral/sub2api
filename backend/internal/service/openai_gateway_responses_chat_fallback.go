@@ -21,6 +21,17 @@ import (
 	"go.uber.org/zap"
 )
 
+// IsStepFunChatCompletionsModel reports the single StepFun chat model,
+// step-5-preview. A provider prefix (vendor/step-5-preview) is the same ID.
+// It only answers on POST /v1/chat/completions.
+func IsStepFunChatCompletionsModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(model, "/"); slash >= 0 {
+		model = strings.TrimSpace(model[slash+1:])
+	}
+	return model == "step-5-preview"
+}
+
 // forwardResponsesViaRawChatCompletions serves /v1/responses clients through an
 // upstream that only supports /v1/chat/completions.
 func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(

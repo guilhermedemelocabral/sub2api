@@ -549,22 +549,44 @@ const (
 // originAPIRejection reports when the inbound protocol is not the upstream
 // origin API. Cross-protocol conversion rewrites tool calls and drops stream
 // events, so the client must call the origin endpoint directly.
-func originAPIRejection(platform, inbound string) string {
+func originAPIRejectionForContext(c *gin.Context, platform, inbound string) string {
 	switch platform {
 	case service.PlatformOpenAI:
-		// OpenAI-compatible upstreams answer as Chat Completions. Gemini and
-		// Antigravity stay reachable from /v1/messages because clients such as
-		// ZCode only speak Anthropic or OpenAI, while the gateway already
-		// calls Gemini upstream in its own protocol.
-		if inbound != originInboundChat {
-			return "This model answers in the OpenAI Chat Completions API. Use POST /v1/chat/completions."
+		if inbound == originInboundChat {
+			return ""
 		}
+		var model string
+		if c != nil && c.Request != nil {
+			model, _ = service.RequestedPublicModelFromContext(c.Request.Context())
+			if model == "" {
+				model, _ = service.ResolvedUpstreamModelFromContext(c.Request.Context())
+			}
+		}
+		// Consult the versioned multiprotocol family registry. Pure CC-only
+		// models still fail closed with the Chat Completions hint.
+		if fam := service.MatchOpenAIMultiprotocolFamily(model); fam != nil {
+			switch inbound {
+			case originInboundMessages:
+				if fam.NativeMessages {
+					return ""
+				}
+			case originInboundResponses:
+				if fam.NativeResponses {
+					return ""
+				}
+			}
+		}
+		return "This model answers in the OpenAI Chat Completions API. Use POST /v1/chat/completions."
 	}
 	return ""
 }
 
+func originAPIRejection(platform, inbound string) string {
+	return originAPIRejectionForContext(nil, platform, inbound)
+}
+
 func rejectForeignOriginProtocol(c *gin.Context, inbound string) bool {
-	message := originAPIRejection(getGroupPlatform(c), inbound)
+	message := originAPIRejectionForContext(c, getGroupPlatform(c), inbound)
 	if message == "" {
 		return false
 	}

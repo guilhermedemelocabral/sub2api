@@ -103,6 +103,7 @@ type ClaudeResponse struct {
 	StopReason   string              `json:"stop_reason,omitempty"`   // end_turn, tool_use, max_tokens
 	StopSequence *string             `json:"stop_sequence,omitempty"` // null 或具体值
 	Usage        ClaudeUsage         `json:"usage"`
+	GatewayHealed bool               `json:"_gateway_healed,omitempty"`
 }
 
 // ClaudeContentItem Claude 响应内容项
