@@ -29,7 +29,7 @@ type StreamingProcessor struct {
 	messageStopSent    bool
 	usedTool           bool
 	hasEmittedText     bool
-	wasHealed          bool
+	emptyVisibleTurn   bool
 	lastFinishReason   string
 	healedFinishReason string
 	thoughtChars       int
@@ -63,17 +63,25 @@ func (p *StreamingProcessor) SetUsageMapHook(fn UsageMapHook) {
 	p.usageMapHook = fn
 }
 
-// WasHealed reports whether this stream had to inject synthetic visible content
-// to prevent empty turn issues on clients like Grok Build / Hermes.
+// EmptyVisibleTurn reports a benign finish (STOP / END_TURN / empty) that
+// produced no visible text and no tool call. Callers must retry that turn
+// when nothing has been written to the client. The gateway must not invent
+// user-visible text for it.
+func (p *StreamingProcessor) EmptyVisibleTurn() bool {
+	return p.emptyVisibleTurn
+}
+
+// WasHealed is retained for callers that still inspect the empty-turn flag.
+// It no longer means synthetic text was injected.
 func (p *StreamingProcessor) WasHealed() bool {
-	return p.wasHealed
+	return p.emptyVisibleTurn
 }
 
 // HealedWithEmptyReason reports whether the healing happened with no upstream
 // finish reason recorded. High prevalence of this case signals an upstream
 // anomaly worth investigating instead of silently normalizing.
 func (p *StreamingProcessor) HealedWithEmptyReason() bool {
-	return p.wasHealed && strings.TrimSpace(p.healedFinishReason) == ""
+	return p.emptyVisibleTurn && strings.TrimSpace(p.healedFinishReason) == ""
 }
 
 // HealStats snapshots turn-content counters for heal-line telemetry.
@@ -610,24 +618,13 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 		}
 	}
 
-	// Auto-healing: ensure clients like Grok Build / Hermes never receive an empty
-	// content: [] turn which causes silent 15x retry loops (no_visible_content).
-	// Allowlist: heal ONLY benign conversational endings. Tool errors, safety
-	// blocks and unknown reasons fail fast at the gateway level, NEVER as
-	// synthetic user-facing text.
+	// Benign empty turns (STOP / END_TURN) are upstream failures, not answers.
+	// Gemini 3.8 Flash can finish with finishReason=STOP and no parts after
+	// internal thinking. Inventing a visible sentence leaks into the client.
+	// Callers retry while the response is still unwritten.
 	if !p.usedTool && !p.hasEmittedText && IsHealableConversationalTurn(finishReason) {
-		p.wasHealed = true
+		p.emptyVisibleTurn = true
 		p.healedFinishReason = finishReason
-		fallbackText := "[gateway: turno sem saída visível após thinking - continuando]"
-		_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
-			"type": "text",
-			"text": "",
-		}))
-		_, _ = result.Write(p.emitDelta("text_delta", map[string]any{
-			"text": fallbackText,
-		}))
-		_, _ = result.Write(p.endBlock())
-		p.hasEmittedText = true
 	}
 
 	// 确定 stop_reason
@@ -674,17 +671,6 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	}
 
 	_, _ = result.Write(p.formatSSE("message_delta", deltaEvent))
-
-	// In-band observability: headers cannot be set after the first SSE flush,
-	// so healed turns are signaled inline for programmatic detection.
-	if p.wasHealed {
-		healedEvent := map[string]any{
-			"type":           "gateway_healed",
-			"gateway_healed": true,
-			"reason":         "empty_turn_synthetic_text_injected",
-		}
-		_, _ = result.Write(p.formatSSE("gateway_healed", healedEvent))
-	}
 
 	if !p.messageStopSent {
 		stopEvent := map[string]any{

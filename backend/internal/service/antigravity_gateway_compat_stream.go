@@ -224,6 +224,11 @@ func (s *antigravityCompatStreamSession) consumeClaudeData(eventType, payload st
 }
 
 func (s *antigravityCompatStreamSession) emitOrBuffer(event apicompat.AnthropicStreamEvent) {
+	// An empty STOP has not reached the client yet. Drop the bare completion
+	// so the failover loop can retry instead of flushing a fake answer.
+	if !s.meaningfulData && s.processor.EmptyVisibleTurn() {
+		return
+	}
 	if s.meaningfulData {
 		s.adapter.Emit(&event, s.writer)
 		return
@@ -351,17 +356,21 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			if !open {
 				if !session.hasMeaningfulData() && !writer.Disconnected() {
-					return handleAntigravityCompatEmptyStream(c, session)
+					if session.preContentKeepaliveSent {
+						// The pre-content ping committed HTTP 200, so the request
+						// can no longer fail over; report an SSE stream error.
+						return handleAntigravityCompatEmptyStream(c, session)
+					}
+					if session.processor.EmptyVisibleTurn() {
+						_, _, _, healedReason := session.processor.HealStats()
+						return nil, antigravityEmptyVisibleTurnError(originalModel, healedReason)
+					}
+					return nil, antigravityCompatEmptyStreamError()
 				}
-				if session.processor.WasHealed() {
-					c.Header("X-Gateway-Healed", "true")
+				if session.processor.EmptyVisibleTurn() {
 					thoughtChars, visibleChars, toolCalls, healedReason := session.processor.HealStats()
 					reqID, clientReqID := healRequestIDs(c)
-					if session.processor.HealedWithEmptyReason() {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s, empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", prefix, reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
-					} else {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (compat %s) request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", prefix, reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
-					}
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] empty visible turn after partial output (compat %s) request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: closing without synthetic text", prefix, reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
 				}
 				return session.finish()
 			}
@@ -547,6 +556,21 @@ func writeAntigravityCompatStreamError(
 
 func antigravityCompatEmptyStreamError() error {
 	logger.LegacyPrintf("service.antigravity_gateway", "Empty Antigravity compatibility stream, triggering failover")
+	return &UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
+		RetryableOnSameAccount: true,
+	}
+}
+
+// antigravityEmptyVisibleTurnError retries a STOP/END_TURN that carried no
+// visible text. Gemini 3.8 Flash does this after internal thinking; the
+// previous behavior injected a user-visible gateway sentence.
+func antigravityEmptyVisibleTurnError(model, finishReason string) error {
+	if strings.TrimSpace(finishReason) == "" {
+		finishReason = "<empty>"
+	}
+	logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] empty visible turn model=%s finish_reason=%s: retrying instead of synthetic text", model, finishReason)
 	return &UpstreamFailoverError{
 		StatusCode:             http.StatusBadGateway,
 		ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
