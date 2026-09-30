@@ -69,25 +69,30 @@ type CompositeRoutePreviewRequest struct {
 // by both the ingress gate and the forwarder; do NOT duplicate model lists
 // elsewhere.
 type OpenAIMultiprotocolFamily struct {
-	Name             string
-	MatchExact       map[string]struct{}
-	MatchPrefix      []string
-	NativeMessages   bool
-	NativeResponses  bool
-	NativeChat       bool
+	Name            string
+	MatchExact      map[string]struct{}
+	MatchPrefix     []string
+	NativeMessages  bool
+	NativeResponses bool
+	NativeChat      bool
 }
 
 // OpenAIMultiprotocolFamilies is the versioned registry of multiprotocol
 // OpenAI-platform upstreams. Verified live 2026-09-30:
 // StepFun Step Plan has native /messages, /responses and /chat/completions;
 // Flatt has native /messages and /chat/completions (no /responses).
+// NativeMessages here means "the ingress gate admits /v1/messages and the
+// forwarder serves it" — either via a native upstream Anthropic endpoint or
+// via the Anthropic→ChatCompletions conversion bridge
+// (forwardAnthropicViaRawChatCompletions). CC-only upstreams without a
+// conversion-safe entry stay out of the registry and keep failing closed.
 var OpenAIMultiprotocolFamilies = []OpenAIMultiprotocolFamily{
 	{
 		Name: "stepfun",
 		MatchExact: map[string]struct{}{
-			"step-5-preview":          {},
-			"stepfun-step-5-preview":  {},
-			"stepfun/step-5-preview":  {},
+			"step-5-preview":         {},
+			"stepfun-step-5-preview": {},
+			"stepfun/step-5-preview": {},
 		},
 		MatchPrefix:     []string{"step-", "stepfun", "stepfun/"},
 		NativeMessages:  true,
@@ -97,17 +102,67 @@ var OpenAIMultiprotocolFamilies = []OpenAIMultiprotocolFamily{
 	{
 		Name: "flatt",
 		MatchExact: map[string]struct{}{
-			"glm-5.3-flash":              {},
-			"glm53flash":                 {},
-			"qwen3.8-27b":                {},
-			"deepseek-v4.1-flash":        {},
-			"muse-spark-1.3":             {},
-			"betallm-glm53flash":         {},
-			"betallm-qwen3.8-27b":        {},
+			"glm-5.3-flash":               {},
+			"glm53flash":                  {},
+			"qwen3.8-27b":                 {},
+			"deepseek-v4.1-flash":         {},
+			"muse-spark-1.3":              {},
+			"betallm-glm53flash":          {},
+			"betallm-qwen3.8-27b":         {},
 			"betallm-deepseek-v4.1-flash": {},
-			"betallm-muse-spark-1.3":     {},
+			"betallm-muse-spark-1.3":      {},
 		},
 		MatchPrefix:     []string{"betallm-"},
+		NativeMessages:  true,
+		NativeResponses: false,
+		NativeChat:      true,
+	},
+	{
+		// Local LLMBoost (Ryzen vLLM): Chat Completions origin served to
+		// /v1/messages clients through the Anthropic→CC conversion bridge.
+		// Upstream has no /v1/messages or /v1/responses of its own.
+		Name: "llmboost",
+		MatchExact: map[string]struct{}{
+			"qwen3.8-flash-next":             {},
+			"qwen3.8-27b-base-w8a16":         {},
+			"qwen3.8-27b-huihui-int8-w8a16":  {},
+			"qwen3.8-27b-juristool-s1-w8a16": {},
+			"mimo-v2.6-flash-rl-exl3":        {},
+		},
+		MatchPrefix:     []string{"qwen3.8-flash", "llmboost-", "llmboost/"},
+		NativeMessages:  true,
+		NativeResponses: false,
+		NativeChat:      true,
+	},
+	{
+		// ChatGPT Codex OAuth: Responses origin served to /v1/messages and
+		// /v1/responses clients through the compat conversion chain.
+		// Live manifest 2026-09-30 (accounts 24/25, plan plus): gpt-5.5,
+		// gpt-5.6-{sol,terra,luna}, gpt-reserve, codex-auto-review.
+		Name: "codex",
+		MatchExact: map[string]struct{}{
+			"gpt-5.5":           {},
+			"gpt-5.6-luna":      {},
+			"gpt-5.6-sol":       {},
+			"gpt-5.6-terra":     {},
+			"gpt-6-luna":        {},
+			"gpt-6-astra":       {},
+			"gpt-reserve":       {},
+			"codex-auto-review": {},
+		},
+		MatchPrefix:     []string{"gpt-5.", "gpt-6", "gpt-5-", "codex-", "gpt-reserve"},
+		NativeMessages:  true,
+		NativeResponses: true,
+		NativeChat:      true,
+	},
+	{
+		// MiniMax M3 via api.minimax.io: Chat Completions origin served to
+		// /v1/messages clients through the Anthropic→CC conversion bridge.
+		Name: "minimax-m3",
+		MatchExact: map[string]struct{}{
+			"minimax-m3": {},
+		},
+		MatchPrefix:     []string{"minimax-m3", "minimax/m3"},
 		NativeMessages:  true,
 		NativeResponses: false,
 		NativeChat:      true,

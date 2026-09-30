@@ -325,6 +325,8 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 		case "SAFETY", "CONTENT_FILTER", "REFUSAL", "BLOCKLIST", "RECITATION",
 			"POLICY_VIOLATION", "HARM_BLOCKLIST", "PROHIBITED_CONTENT":
 			stopReason = "refusal"
+		case "MALFORMED_FUNCTION_CALL":
+			stopReason = "error"
 		}
 	}
 

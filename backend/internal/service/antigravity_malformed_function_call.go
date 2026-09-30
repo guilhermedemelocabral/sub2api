@@ -62,12 +62,16 @@ func antigravityMalformedFunctionCallRetry(c *gin.Context, model string) error {
 		}
 	}
 	// Never return nil to deliver empty or corrupt payload to the client.
+	// MALFORMED is deterministic for a given prompt+schema (the upstream fails
+	// the same serialization on every account), so stop instead of burning the
+	// whole pool through the failover loop.
 	logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] MALFORMED_FUNCTION_CALL exhausted retries across accounts: model=%s", model)
 	return &UpstreamFailoverError{
 		StatusCode:             http.StatusBadGateway,
 		ResponseBody:           []byte(`{"error":{"type":"api_error","message":"Gemini failed to format function call arguments after retries"}}`),
 		RetryableOnSameAccount: false,
 		RequestScopedTransient: false,
+		NextAccountAction:      NextAccountStop,
 	}
 }
 

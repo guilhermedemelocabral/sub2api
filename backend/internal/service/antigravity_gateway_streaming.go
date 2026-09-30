@@ -1221,6 +1221,14 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				if retryErr := antigravityMalformedFunctionCallRetry(c, originalModel); retryErr != nil {
 					return nil, retryErr
 				}
+				// Headers flushed (partial output already sent): never let the
+				// corrupt tail masquerade as a clean finish. Abort with an
+				// in-band SSE error, like the safety-refusal path above.
+				if c.Writer.Written() {
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] MALFORMED_FUNCTION_CALL mid-stream for model %s: emitting SSE error", originalModel)
+					sendErrorEvent("malformed_function_call")
+					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, fmt.Errorf("upstream malformed function call")
+				}
 			}
 
 			// 处理 SSE 行，转换为 Claude 格式
