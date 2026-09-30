@@ -55,15 +55,23 @@ type NonStreamingProcessor struct {
 	thinkingSignature  string
 	trailingSignature  string
 	hasToolCall        bool
-	wasHealed          bool
+	emptyVisibleTurn   bool
 	healedFinishReason string
 	thoughtChars       int
 	visibleTextChars   int
 	toolCallCount      int
 }
 
+// EmptyVisibleTurn reports a benign finish with no visible text and no tool
+// call. Callers retry it instead of returning synthetic user-facing text.
+func (p *NonStreamingProcessor) EmptyVisibleTurn() bool {
+	return p.emptyVisibleTurn
+}
+
+// WasHealed is retained for callers that still inspect the empty-turn flag.
+// It no longer means synthetic text was injected.
 func (p *NonStreamingProcessor) WasHealed() bool {
-	return p.wasHealed
+	return p.emptyVisibleTurn
 }
 
 // HealStats snapshots turn-content counters for heal-line telemetry.
@@ -301,18 +309,11 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 			break
 		}
 	}
-	// Heals ONLY benign conversational endings (see IsHealableConversationalTurn).
-	// Tool call formatting errors, safety blocks and unknown reasons are
-	// handled strictly at the gateway level via retry/502, NEVER as synthetic
-	// user-facing text.
+	// Benign empty turns are retried by the gateway. Do not invent visible text:
+	// Gemini 3.8 Flash can return finishReason=STOP with no parts.
 	if !hasVisible && IsHealableConversationalTurn(finishReason) {
-		p.wasHealed = true
+		p.emptyVisibleTurn = true
 		p.healedFinishReason = finishReason
-		fallbackText := "[gateway: turno sem saída visível após thinking - continuando]"
-		p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
-			Type: "text",
-			Text: fallbackText,
-		})
 	}
 
 	stopReason := "end_turn"
@@ -358,7 +359,7 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 		Content:       p.contentBlocks,
 		StopReason:    stopReason,
 		Usage:         usage,
-		GatewayHealed: p.wasHealed,
+		GatewayHealed: p.emptyVisibleTurn,
 	}
 }
 

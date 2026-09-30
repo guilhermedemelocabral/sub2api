@@ -985,14 +985,9 @@ returnResponse:
 		return nil, nil, fmt.Errorf("failed to marshal claude response: %w", merr)
 	}
 	agUsage := &claudeObj.Usage
-	if nsProcessor.WasHealed() {
-		thoughtChars, visibleChars, toolCalls, healedReason := nsProcessor.HealStats()
-		reqID, clientReqID := healRequestIDs(c)
-		if strings.TrimSpace(healedReason) == "" {
-			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream, empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
-		} else {
-			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (non-stream) request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
-		}
+	if nsProcessor.EmptyVisibleTurn() {
+		_, _, _, healedReason := nsProcessor.HealStats()
+		return nil, nil, antigravityEmptyVisibleTurnError(originalModel, healedReason)
 	}
 
 	// 转换为 service.ClaudeUsage
@@ -1164,15 +1159,14 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			if !ok {
 				// 上游完成，发送结束事件
 				finalEvents, agUsage := processor.Finish()
-				if processor.WasHealed() {
-					c.Header("X-Gateway-Healed", "true")
+				if processor.EmptyVisibleTurn() && !c.Writer.Written() && !cw.Disconnected() {
+					_, _, _, healedReason := processor.HealStats()
+					return nil, antigravityEmptyVisibleTurnError(originalModel, healedReason)
+				}
+				if processor.EmptyVisibleTurn() {
 					thoughtChars, visibleChars, toolCalls, healedReason := processor.HealStats()
 					reqID, clientReqID := healRequestIDs(c)
-					if processor.HealedWithEmptyReason() {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn (empty_reason) request_id=%s client_request_id=%s model=%s finish_reason=<empty> thought_chars=%d visible_chars=%d tool_calls=%d: upstream gave no finish reason", reqID, clientReqID, originalModel, thoughtChars, visibleChars, toolCalls)
-					} else {
-						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Auto-healed empty turn request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: injected synthetic visible content", reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
-					}
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] empty visible turn after partial output request_id=%s client_request_id=%s model=%s finish_reason=%s thought_chars=%d visible_chars=%d tool_calls=%d: closing without synthetic text", reqID, clientReqID, originalModel, healedReason, thoughtChars, visibleChars, toolCalls)
 				}
 				if len(finalEvents) > 0 {
 					cw.Write(finalEvents)
@@ -1228,6 +1222,10 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 			// 处理 SSE 行，转换为 Claude 格式
 			claudeEvents := processor.ProcessLine(strings.TrimRight(ev.line, "\r\n"))
+			if processor.EmptyVisibleTurn() && !c.Writer.Written() && !cw.Disconnected() {
+				_, _, _, healedReason := processor.HealStats()
+				return nil, antigravityEmptyVisibleTurnError(originalModel, healedReason)
+			}
 			if len(claudeEvents) > 0 {
 				if firstTokenMs == nil {
 					ms := int(time.Since(startTime).Milliseconds())
