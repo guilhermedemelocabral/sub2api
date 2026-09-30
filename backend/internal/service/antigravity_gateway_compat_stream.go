@@ -314,6 +314,12 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStream(
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
 			if reason := antigravityFinishReasonOfLine(event.line); antigravity.IsUpstreamSafetyRefusal(reason) {
+				if c.Writer.Written() {
+					// Headers flushed: abort as in-band stream error, never as HTTP status.
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] safety refusal mid-stream (compat %s) for model %s finish_reason=%s: aborting with stream error", prefix, originalModel, reason)
+					writeAntigravityCompatStreamError(c, adapter, session.writer, "refusal")
+					return session.collectResult(false), fmt.Errorf("upstream safety refusal")
+				}
 				return nil, UpstreamSafetyRefusalError(originalModel, reason)
 			}
 			if isAntigravityMalformedFunctionCallLine(event.line) {

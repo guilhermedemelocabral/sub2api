@@ -23,21 +23,21 @@ type UsageMapHook func(usageMap map[string]any)
 
 // StreamingProcessor 流式响应处理器
 type StreamingProcessor struct {
-	blockType         BlockType
-	blockIndex        int
-	messageStartSent  bool
-	messageStopSent   bool
-	usedTool          bool
-	hasEmittedText    bool
-	wasHealed         bool
-	lastFinishReason  string
+	blockType          BlockType
+	blockIndex         int
+	messageStartSent   bool
+	messageStopSent    bool
+	usedTool           bool
+	hasEmittedText     bool
+	wasHealed          bool
+	lastFinishReason   string
 	healedFinishReason string
-	pendingSignature  string
-	trailingSignature string
-	originalModel     string
-	webSearchQueries  []string
-	groundingChunks   []GeminiGroundingChunk
-	usageMapHook      UsageMapHook
+	pendingSignature   string
+	trailingSignature  string
+	originalModel      string
+	webSearchQueries   []string
+	groundingChunks    []GeminiGroundingChunk
+	usageMapHook       UsageMapHook
 
 	// 累计 usage
 	inputTokens       int
@@ -148,7 +148,7 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 	// 检查是否结束
 	if len(geminiResp.Candidates) > 0 {
 		finishReason := geminiResp.Candidates[0].FinishReason
-		if finishReason == "MALFORMED_FUNCTION_CALL" {
+		if NormalizeFinishReason(finishReason) == "MALFORMED_FUNCTION_CALL" {
 			log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in stream for model %s", p.originalModel)
 			if geminiResp.Candidates[0].Content != nil {
 				if b, err := json.Marshal(geminiResp.Candidates[0].Content); err == nil {
@@ -519,6 +519,32 @@ func NormalizeFinishReason(finishReason string) string {
 	return strings.ToUpper(strings.TrimSpace(finishReason))
 }
 
+// SafetyRefusalSSE builds an in-band SSE refusal payload for mid-stream safety
+// blocks, when HTTP headers were already flushed and a status change is
+// impossible. Emits a standard message_delta with stop_reason refusal.
+func SafetyRefusalSSE(finishReason string) []byte {
+	payload := map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   "refusal",
+			"stop_sequence": nil,
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	buf.WriteString("event: message_delta" + "\n")
+	buf.WriteString("data: ")
+	buf.Write(data)
+	buf.WriteString("\n\n")
+	buf.WriteString("event: message_stop" + "\n")
+	buf.WriteString("data: {\"type\":\"message_stop\"}" + "\n\n")
+	_ = finishReason
+	return buf.Bytes()
+}
+
 // IsUpstreamSafetyRefusal reports whether the finish reason is a content
 // safety/censorship refusal. Such turns must propagate as-is without retry
 // (retrying with account rotation would bypass content filters) and must
@@ -627,9 +653,9 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	// so healed turns are signaled inline for programmatic detection.
 	if p.wasHealed {
 		healedEvent := map[string]any{
-			"type": "gateway_healed",
+			"type":           "gateway_healed",
 			"gateway_healed": true,
-			"reason": "empty_turn_synthetic_text_injected",
+			"reason":         "empty_turn_synthetic_text_injected",
 		}
 		_, _ = result.Write(p.formatSSE("gateway_healed", healedEvent))
 	}
