@@ -1187,6 +1187,12 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			lastDataAt = time.Now()
 			s.observeAntigravityGeminiSSELine(c, ev.line)
 			if reason := antigravityFinishReasonOfLine(ev.line); antigravity.IsUpstreamSafetyRefusal(reason) {
+				if c.Writer.Written() {
+					// Headers already flushed: propagate as in-band SSE refusal.
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] safety refusal mid-stream for model %s finish_reason=%s: emitting SSE refusal", originalModel, reason)
+					cw.Write(antigravity.SafetyRefusalSSE(reason))
+					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+				}
 				return nil, UpstreamSafetyRefusalError(originalModel, reason)
 			}
 			if isAntigravityMalformedFunctionCallLine(ev.line) {
