@@ -176,7 +176,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		return nil, err
 	}
 
-	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
+	params := antigravityRetryLoopParams{
 		ctx:             ctx,
 		prefix:          call.prefix,
 		account:         account,
@@ -193,12 +193,38 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		isStickySession: false,
 		groupID:         0,
 		sessionHash:     "",
-	})
+	}
+	result, err := s.antigravityRetryLoop(params)
 	if err != nil {
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 
-	return s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp)
+	fwd, err := s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp)
+	if err == nil || !isAntigravityEmptyVisibleTurn(err) || !clientResponseNotWritten(c) {
+		return fwd, err
+	}
+	return s.continueAntigravityCompatAfterEmptyTurn(ctx, c, account, call, params)
+}
+
+func (s *AntigravityGatewayService) continueAntigravityCompatAfterEmptyTurn(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	call *antigravityCompatUpstreamCall,
+	params antigravityRetryLoopParams,
+) (*ForwardResult, error) {
+	resp, err := s.openAntigravityContinuation(ctx, params)
+	if err != nil {
+		if isAntigravityEmptyVisibleTurn(err) {
+			return nil, err
+		}
+		return nil, s.handleAntigravityCompatTransportError(c, err)
+	}
+	fwd, err := s.consumeAntigravityCompatResponse(ctx, c, account, call, resp)
+	if isAntigravityEmptyVisibleTurn(err) {
+		return nil, antigravityEmptyVisibleTurnExhausted()
+	}
+	return fwd, err
 }
 
 func (s *AntigravityGatewayService) prepareAntigravityCompatCall(

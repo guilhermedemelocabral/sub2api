@@ -491,6 +491,8 @@ func antigravityEmptyVisibleTurnError(model, finishReason string) error {
 		StatusCode:             http.StatusBadGateway,
 		ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
 		RetryableOnSameAccount: true,
+		RequestScopedTransient: true,
+		Reason:                 GatewayFailureReasonEmptyVisibleTurn,
 	}
 }
 

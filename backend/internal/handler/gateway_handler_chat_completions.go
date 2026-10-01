@@ -388,6 +388,10 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 		h.chatCompletionsErrorResponse(c, status, "server_error", message)
 		return
 	}
+	if lastErr != nil && lastErr.NextAccountAction == service.NextAccountStop && lastErr.Reason == service.GatewayFailureReasonEmptyVisibleTurn {
+		h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", lastErr.ClientMessage)
+		return
+	}
 	if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
 		status := lastErr.ClientStatusCode
 		if status <= 0 {
