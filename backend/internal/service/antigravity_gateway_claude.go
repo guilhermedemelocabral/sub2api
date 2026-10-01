@@ -103,7 +103,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	action := "streamGenerateContent"
 
 	// 执行带重试的请求
-	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
+	retryParams := antigravityRetryLoopParams{
 		ctx:             ctx,
 		prefix:          prefix,
 		account:         account,
@@ -120,7 +120,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		isStickySession: isStickySession, // Forward 由上层判断粘性会话
 		groupID:         0,               // Forward 方法没有 groupID，由上层处理粘性会话清除
 		sessionHash:     "",              // Forward 方法没有 sessionHash，由上层处理粘性会话清除
-	})
+	}
+	result, err := s.antigravityRetryLoop(retryParams)
 	if err != nil {
 		// 检查是否是账号切换信号，转换为 UpstreamFailoverError 让 Handler 切换账号
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
@@ -445,26 +446,28 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	var clientDisconnect bool
+	var streamRes *antigravityStreamResult
 	if claudeReq.Stream {
 		// 客户端要求流式，直接透传转换
-		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
-		if err != nil {
-			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
-			return nil, err
-		}
-		usage = streamRes.usage
-		firstTokenMs = streamRes.firstTokenMs
-		clientDisconnect = streamRes.clientDisconnect
+		streamRes, err = s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
 	} else {
 		// 客户端要求非流式，收集流式响应后转换返回
-		streamRes, err := s.handleClaudeStreamToNonStreaming(c, resp, startTime, originalModel)
-		if err != nil {
-			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
-			return nil, err
-		}
-		usage = streamRes.usage
-		firstTokenMs = streamRes.firstTokenMs
+		streamRes, err = s.handleClaudeStreamToNonStreaming(c, resp, startTime, originalModel)
 	}
+	if isAntigravityEmptyVisibleTurn(err) && clientResponseNotWritten(c) {
+		streamRes, err = s.continueClaudeAfterEmptyTurn(ctx, c, retryParams, claudeReq.Stream, startTime, originalModel)
+	}
+	if err != nil {
+		if claudeReq.Stream {
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
+		} else {
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
+		}
+		return nil, err
+	}
+	usage = streamRes.usage
+	firstTokenMs = streamRes.firstTokenMs
+	clientDisconnect = streamRes.clientDisconnect
 
 	return &ForwardResult{
 		RequestID:                     requestID,

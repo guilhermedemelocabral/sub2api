@@ -1621,6 +1621,10 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
 		return
 	}
+	if failoverErr != nil && failoverErr.NextAccountAction == service.NextAccountStop && failoverErr.Reason == service.GatewayFailureReasonEmptyVisibleTurn {
+		h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr != nil && failoverErr.IsOpenAICapacityShed() && strings.TrimSpace(failoverErr.ClientMessage) != "" {
 		status := failoverErr.ClientStatusCode
 		if status <= 0 {
