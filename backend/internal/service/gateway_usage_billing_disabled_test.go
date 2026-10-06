@@ -82,3 +82,36 @@ func TestApplyUsageBilling_EnabledKeepsMoney(t *testing.T) {
 	require.NotNil(t, repo.lastCmd)
 	require.InDelta(t, 2.5, repo.lastCmd.BalanceCost, 1e-12)
 }
+
+// Router-only mode: the legacy fallback (nil billing repo) must zero money the
+// same way the unified repo path does, or endpoints that fall back here keep
+// draining users.balance even with billing.disabled=true.
+func TestApplyUsageBilling_LegacyPathDisabledZeroesMoney(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Billing.Disabled = true
+	deps := &billingDeps{cfg: cfg, deferredService: &DeferredService{}}
+	params := newDisabledBillingTestParams()
+
+	applied, err := applyUsageBilling(context.Background(), "req-legacy", &UsageLog{Model: "glm-5.3-flash"}, params, deps, nil)
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NotNil(t, params.Cost)
+	require.Zero(t, params.Cost.ActualCost)
+	require.Zero(t, params.Cost.TotalCost)
+	require.Zero(t, params.Cost.InputCost)
+	require.Zero(t, params.Cost.OutputCost)
+}
+
+func TestApplyUsageBilling_LegacyPathEnabledKeepsMoney(t *testing.T) {
+	cfg := &config.Config{}
+	deps := &billingDeps{cfg: cfg, deferredService: &DeferredService{}}
+	params := newDisabledBillingTestParams()
+
+	// With billing enabled and no repo, the legacy path attempts a real
+	// deduction; deps.userRepo is nil here so it must panic rather than
+	// silently drop the cost — proving money was NOT zeroed.
+	require.Panics(t, func() {
+		_, _ = applyUsageBilling(context.Background(), "req-legacy-on", &UsageLog{Model: "glm-5.3-flash"}, params, deps, nil)
+	})
+	require.InDelta(t, 2.5, params.Cost.ActualCost, 1e-12)
+}

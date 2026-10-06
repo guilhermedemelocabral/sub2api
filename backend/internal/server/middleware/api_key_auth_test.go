@@ -1792,3 +1792,68 @@ func (r *stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64,
 func (r *stubUserSubscriptionRepo) BatchUpdateExpiredStatus(ctx context.Context) (int64, error) {
 	return 0, errors.New("not implemented")
 }
+
+func TestAPIKeyAuthBalanceGateRespectsBillingDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newEnv := func(billingDisabled bool) (*gin.Engine, string) {
+		group := &service.Group{
+			ID:       201,
+			Name:     "router-only",
+			Status:   service.StatusActive,
+			Platform: service.PlatformAnthropic,
+			Hydrated: true,
+		}
+		user := &service.User{
+			ID:          7,
+			Role:        service.RoleUser,
+			Status:      service.StatusActive,
+			Balance:     -0.00183849,
+			Concurrency: 3,
+		}
+		apiKey := &service.APIKey{
+			ID:     100,
+			UserID: user.ID,
+			Key:    "test-key",
+			Status: service.StatusActive,
+			User:   user,
+			Group:  group,
+		}
+		apiKey.GroupID = &group.ID
+
+		apiKeyRepo := &stubApiKeyRepo{
+			getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
+				if key != apiKey.Key {
+					return nil, service.ErrAPIKeyNotFound
+				}
+				clone := *apiKey
+				return &clone, nil
+			},
+		}
+		cfg := &config.Config{RunMode: config.RunModeStandard}
+		cfg.Billing.Disabled = billingDisabled
+		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
+		router := gin.New()
+		router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, nil, cfg)))
+		router.GET("/t", func(c *gin.Context) { c.Status(http.StatusOK) })
+		return router, apiKey.Key
+	}
+
+	t.Run("billing_enabled_rejects_nonpositive_balance", func(t *testing.T) {
+		router, key := newEnv(false)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/t", nil)
+		req.Header.Set("x-api-key", key)
+		router.ServeHTTP(w, req)
+		require.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("billing_disabled_admits_nonpositive_balance", func(t *testing.T) {
+		router, key := newEnv(true)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/t", nil)
+		req.Header.Set("x-api-key", key)
+		router.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+}

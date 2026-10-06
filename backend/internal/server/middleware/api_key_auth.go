@@ -260,9 +260,13 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 				}
 			} else {
 				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查
-				if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
-					AbortWithError(c, 403, "INSUFFICIENT_BALANCE", "Insufficient account balance")
-					return
+				// Router-only 模式（billing.disabled）下余额不是门禁，避免余额
+				// 归零后整个网关被这里 403 掉（billing-cache 已在自身入口跳过）。
+				if cfg == nil || !cfg.Billing.Disabled {
+					if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
+						AbortWithError(c, 403, "INSUFFICIENT_BALANCE", "Insufficient account balance")
+						return
+					}
 				}
 			}
 		}

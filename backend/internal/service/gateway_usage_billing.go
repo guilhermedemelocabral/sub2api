@@ -144,6 +144,13 @@ func (p *postUsageBillingParams) shouldUpdateAccountQuota() bool {
 // billing repo is unavailable (nil). Production uses applyUsageBilling → repo.Apply
 // for atomic billing. This path only runs in tests or degraded mode.
 func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps) {
+	// Router-only mode zeroes money the same way applyUsageBilling does: with
+	// billing disabled the legacy path must not deduct balances either, else
+	// endpoints that fall back here keep draining users.balance silently.
+	if deps != nil && deps.cfg != nil && deps.cfg.Billing.Disabled && p != nil && p.Cost != nil {
+		*p.Cost = CostBreakdown{BillingMode: p.Cost.BillingMode}
+	}
+
 	billingCtx, cancel := detachedBillingContext(ctx)
 	defer cancel()
 
