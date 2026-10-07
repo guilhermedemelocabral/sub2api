@@ -1,0 +1,11 @@
+# Local deployment override — auto-loaded by `docker compose up` next to
+# docker-compose.yml. Pins the locally built image (with router-only
+# billing + passthrough idle watchdog, not present upstream) and the
+# router-only env. Plain `up -d` reproduces production; no /tmp files.
+services:
+  sub2api:
+    image: sub2api:remote-proxy
+    environment:
+      - BILLING_DISABLED=true
+      - GATEWAY_LOG_UPSTREAM_ERROR_BODY=true
+      - GATEWAY_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES=1024
