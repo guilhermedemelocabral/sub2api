@@ -106,34 +106,18 @@ type smartRetryResult struct {
 // handleSmartRetry 处理 OAuth 账号的智能重试逻辑
 // 将 429/503 限流处理逻辑抽取为独立函数，减少 antigravityRetryLoop 的复杂度
 func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParams, resp *http.Response, respBody []byte, baseURL string, urlIdx int, availableURLs []string) *smartRetryResult {
+	if isAntigravityQuotaExhausted(p.account, resp.StatusCode, respBody) {
+		return s.handleAntigravityQuotaExhausted(p, resp, respBody, baseURL)
+	}
+
 	// "Resource has been exhausted" 是 URL 级别限流，切换 URL（仅 429）
 	if resp.StatusCode == http.StatusTooManyRequests && isURLLevelRateLimit(respBody) && urlIdx < len(availableURLs)-1 {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s URL fallback (429): %s -> %s", p.prefix, baseURL, availableURLs[urlIdx+1])
 		return &smartRetryResult{action: smartRetryActionContinueURL}
 	}
 
-	category := antigravity429Unknown
-	if resp.StatusCode == http.StatusTooManyRequests {
-		category = classifyAntigravity429(respBody)
-	}
-
 	// 判断是否触发智能重试
 	shouldSmartRetry, shouldRateLimitModel, waitDuration, modelName, isModelCapacityExhausted := shouldTriggerAntigravitySmartRetry(p.account, respBody)
-
-	// AI Credits 超量请求：
-	// 仅在上游明确返回免费配额耗尽时才允许切换到 credits。
-	if resp.StatusCode == http.StatusTooManyRequests &&
-		category == antigravity429QuotaExhausted &&
-		p.account.IsOveragesEnabled() &&
-		!p.account.isCreditsExhausted() {
-		result := s.attemptCreditsOveragesRetry(p, baseURL, modelName, waitDuration, resp.StatusCode, respBody)
-		if result.handled && result.resp != nil {
-			return &smartRetryResult{
-				action: smartRetryActionBreakWithResp,
-				resp:   result.resp,
-			}
-		}
-	}
 
 	// 情况1: retryDelay >= 阈值，限流模型并切换账号
 	if shouldRateLimitModel {
@@ -254,6 +238,10 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 			if retryResp != nil {
 				lastRetryBody, _ = io.ReadAll(io.LimitReader(retryResp.Body, 8<<10))
 				_ = retryResp.Body.Close()
+			}
+
+			if isAntigravityQuotaExhausted(p.account, retryResp.StatusCode, lastRetryBody) {
+				return s.handleAntigravityQuotaExhausted(p, retryResp, lastRetryBody, baseURL)
 			}
 
 			// 解析新的重试信息，用于下次重试的等待时间（MODEL_CAPACITY_EXHAUSTED 使用固定循环，跳过）
@@ -429,6 +417,10 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 		lastRetryBody, _ = io.ReadAll(io.LimitReader(retryResp.Body, 8<<10))
 		_ = retryResp.Body.Close()
 
+		if isAntigravityQuotaExhausted(p.account, retryResp.StatusCode, lastRetryBody) {
+			return s.handleAntigravityQuotaExhausted(p, retryResp, lastRetryBody, baseURL)
+		}
+
 		// 解析新的重试信息，更新下次等待时间
 		if attempt < antigravitySingleAccountSmartRetryMaxAttempts && lastRetryBody != nil {
 			_, _, newWaitDuration, _, _ := shouldTriggerAntigravitySmartRetry(p.account, lastRetryBody)
@@ -499,6 +491,7 @@ func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopP
 					OriginalAccountID: p.account.ID,
 					RateLimitedModel:  p.requestedModel,
 					IsStickySession:   p.isStickySession,
+					Reason:            antigravityPreflightQuotaReason(p.ctx, p.account, p.requestedModel),
 				}
 			}
 		}
@@ -864,12 +857,12 @@ func isSingleAccountRetry(ctx context.Context) bool {
 // setModelRateLimitByModelName 使用官方模型 ID 设置模型级限流
 // 直接使用上游返回的模型 ID（如 claude-sonnet-4-5）作为限流 key
 // 返回是否已成功设置（若模型名为空或 repo 为 nil 将返回 false）
-func setModelRateLimitByModelName(ctx context.Context, repo AccountRepository, accountID int64, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool) bool {
+func setModelRateLimitByModelName(ctx context.Context, repo AccountRepository, accountID int64, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool, reason ...string) bool {
 	if repo == nil || modelName == "" {
 		return false
 	}
 	// 直接使用官方模型 ID 作为 key，不再转换为 scope
-	if err := repo.SetModelRateLimit(ctx, accountID, modelName, resetAt); err != nil {
+	if err := repo.SetModelRateLimit(ctx, accountID, modelName, resetAt, reason...); err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d model_rate_limit_failed model=%s error=%v", prefix, statusCode, modelName, err)
 		return false
 	}
@@ -881,7 +874,7 @@ func setModelRateLimitByModelName(ctx context.Context, repo AccountRepository, a
 	return true
 }
 
-func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Context, repo AccountRepository, account *Account, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool) bool {
+func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Context, repo AccountRepository, account *Account, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool, reason ...string) bool {
 	if account == nil || repo == nil {
 		return false
 	}
@@ -892,8 +885,8 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 
 	success := false
 	for _, key := range keys {
-		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, resetAt, afterSmartRetry) {
-			s.updateAccountModelRateLimitInCache(ctx, account, key, resetAt)
+		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, resetAt, afterSmartRetry, reason...) {
+			s.updateAccountModelRateLimitInCache(ctx, account, key, resetAt, reason...)
 			success = true
 		}
 	}
@@ -1170,26 +1163,17 @@ func (s *AntigravityGatewayService) setModelRateLimitAndClearSession(p *handleMo
 }
 
 // updateAccountModelRateLimitInCache 立即更新 Redis 中账号的模型限流状态
-func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx context.Context, account *Account, modelKey string, resetAt time.Time) {
+func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx context.Context, account *Account, modelKey string, resetAt time.Time, reason ...string) {
 	if s.schedulerSnapshot == nil || account == nil || modelKey == "" {
 		return
 	}
 
-	// 更新账号对象的 Extra 字段
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
+	// 更新账号对象的 Extra 字段；无 reason 的通用限流会清除旧 quota 证据。
+	limitReason := ""
+	if len(reason) > 0 {
+		limitReason = reason[0]
 	}
-
-	limits, _ := account.Extra["model_rate_limits"].(map[string]any)
-	if limits == nil {
-		limits = make(map[string]any)
-		account.Extra["model_rate_limits"] = limits
-	}
-
-	limits[modelKey] = map[string]any{
-		"rate_limited_at":     time.Now().UTC().Format(time.RFC3339),
-		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
-	}
+	setAccountModelRateLimitSnapshot(account, modelKey, resetAt, limitReason, time.Now())
 
 	// 更新 Redis 快照
 	if err := s.schedulerSnapshot.UpdateAccountInCache(ctx, account); err != nil {

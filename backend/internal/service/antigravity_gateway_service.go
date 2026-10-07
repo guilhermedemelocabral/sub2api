@@ -92,6 +92,9 @@ type AntigravityAccountSwitchError struct {
 	OriginalAccountID int64
 	RateLimitedModel  string
 	IsStickySession   bool // 是否为粘性会话切换（决定是否缓存计费）
+	Reason            GatewayFailureReason
+	ResponseBody      []byte
+	ResponseHeaders   http.Header
 }
 
 func (e *AntigravityAccountSwitchError) Error() string {
@@ -208,6 +211,11 @@ func (s *AntigravityGatewayService) checkErrorPolicy(ctx context.Context, accoun
 // applyErrorPolicy 应用错误策略结果，返回是否应终止当前循环及应返回的状态码。
 // ErrorPolicySkipped 时 outStatus 为 500（前端约定：未命中的错误返回 500）。
 func (s *AntigravityGatewayService) applyErrorPolicy(p antigravityRetryLoopParams, statusCode int, headers http.Header, respBody []byte) (handled bool, outStatus int, retErr error) {
+	// Confirmed quota must reach smart retry (including credits) and account failover.
+	// All other errors retain the configured policy's precedence.
+	if isAntigravityQuotaExhausted(p.account, statusCode, respBody) {
+		return false, statusCode, nil
+	}
 	modelKey := resolveFinalAntigravityModelKey(p.ctx, p.account, p.requestedModel)
 	switch s.checkErrorPolicy(p.ctx, p.account, statusCode, respBody, modelKey) {
 	case ErrorPolicySkipped:

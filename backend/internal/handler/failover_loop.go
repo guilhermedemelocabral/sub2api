@@ -125,6 +125,7 @@ func effectiveSameAccountRetryLimit(failoverErr *service.UpstreamFailoverError, 
 type FailoverState struct {
 	SwitchCount           int
 	MaxSwitches           int
+	quotaSwitchCount      int
 	FailedAccountIDs      map[int64]struct{}
 	SameAccountRetryCount map[int64]int
 	LastFailoverErr       *service.UpstreamFailoverError
@@ -208,6 +209,25 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverExhausted
 	}
 
+	if platform == service.PlatformAntigravity && failoverErr.Reason == service.AntigravityQuotaExhaustedReason {
+		if _, alreadyFailed := s.FailedAccountIDs[accountID]; alreadyFailed {
+			return FailoverExhausted
+		}
+		if needForceCacheBilling(s.hasBoundSession, failoverErr, false) {
+			s.ForceCacheBilling = true
+		}
+		s.FailedAccountIDs[accountID] = struct{}{}
+		s.quotaSwitchCount++
+		s.SwitchCount++
+		logger.FromContext(ctx).Warn("gateway.failover_quota_switch_account",
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.Int("switch_count", s.SwitchCount),
+			zap.Int("quota_switch_count", s.quotaSwitchCount),
+		)
+		return FailoverContinue
+	}
+
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。
 	retryCount := s.SameAccountRetryCount[accountID]
 	sameAccountRetry := sameAccountRetryAllowed(failoverErr, retryCount, retryLimit)
@@ -241,8 +261,9 @@ func (s *FailoverState) HandleFailoverError(
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
 
-	// 检查是否耗尽
-	if s.SwitchCount >= s.MaxSwitches {
+	// Quota switches only exclude exhausted accounts; they do not consume the
+	// retry budget for unrelated failures.
+	if s.SwitchCount-s.quotaSwitchCount >= s.MaxSwitches {
 		return FailoverExhausted
 	}
 
@@ -257,7 +278,7 @@ func (s *FailoverState) HandleFailoverError(
 
 	// Antigravity 平台换号线性递增延时
 	if platform == service.PlatformAntigravity {
-		delay := time.Duration(s.SwitchCount-1) * time.Second
+		delay := time.Duration(s.SwitchCount-s.quotaSwitchCount-1) * time.Second
 		if !sleepWithContext(ctx, delay) {
 			return FailoverCanceled
 		}
@@ -278,6 +299,12 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 	// 不代表账号耗尽，直接按取消终止。
 	if ctx.Err() != nil {
 		return FailoverCanceled
+	}
+
+	// A quota scan is finite: a stale snapshot or a later 503 must not revive
+	// accounts already excluded by this request.
+	if s.quotaSwitchCount > 0 {
+		return FailoverExhausted
 	}
 
 	if s.LastFailoverErr != nil &&

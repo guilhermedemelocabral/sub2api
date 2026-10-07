@@ -125,10 +125,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	if err != nil {
 		// 检查是否是账号切换信号，转换为 UpstreamFailoverError 让 Handler 切换账号
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
-			return nil, &UpstreamFailoverError{
-				StatusCode:        http.StatusServiceUnavailable,
-				ForceCacheBilling: switchErr.IsStickySession,
-			}
+			return nil, switchErr.ToUpstreamFailoverError()
 		}
 		// 区分客户端取消和真正的上游失败，返回更准确的错误消息
 		if c.Request.Context().Err() != nil {
@@ -209,6 +206,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					sessionHash:     "", // Forward 方法没有 sessionHash，由上层处理粘性会话清除
 				})
 				if retryErr != nil {
+					if switchErr, ok := IsAntigravityAccountSwitchError(retryErr); ok {
+						return nil, switchErr.ToUpstreamFailoverError()
+					}
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 						ProxyID:            opsUpstreamProxyID(account),
 						ProxyName:          opsUpstreamProxyName(account),
@@ -353,6 +353,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 								}
 							}
 						} else {
+							if switchErr, ok := IsAntigravityAccountSwitchError(retryErr); ok {
+								return nil, switchErr.ToUpstreamFailoverError()
+							}
 							logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: budget rectifier retry failed: %v", account.ID, retryErr)
 						}
 					}
