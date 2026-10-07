@@ -113,10 +113,7 @@ func (s *AntigravityGatewayService) continueClaudeAfterEmptyTurn(
 	resp, err := s.openAntigravityContinuation(ctx, params)
 	if err != nil {
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
-			return nil, &UpstreamFailoverError{
-				StatusCode:        http.StatusServiceUnavailable,
-				ForceCacheBilling: switchErr.IsStickySession,
-			}
+			return nil, switchErr.ToUpstreamFailoverError()
 		}
 		if isAntigravityEmptyVisibleTurn(err) {
 			return nil, err

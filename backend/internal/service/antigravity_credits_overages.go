@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -34,7 +35,7 @@ var (
 	}
 
 	creditsExhaustedKeywords = []string{
-		"google_one_ai",
+		"insufficient google_one_ai credits",
 		"insufficient credit",
 		"insufficient credits",
 		"not enough credit",
@@ -145,7 +146,8 @@ func shouldMarkCreditsExhausted(resp *http.Response, respBody []byte, reqErr err
 	if reqErr != nil || resp == nil {
 		return false
 	}
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout {
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusBadRequest {
 		return false
 	}
 	// 注意：不再检查 isURLLevelRateLimit。此函数仅在积分重试失败后调用，
@@ -200,7 +202,15 @@ func (s *AntigravityGatewayService) attemptCreditsOveragesRetry(
 		return &creditsOveragesRetryResult{handled: true, resp: creditsResp}
 	}
 
-	s.handleCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, creditsResp, err)
+	creditsRespBody := s.handleCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, creditsResp, err)
+	if err == nil && creditsResp != nil &&
+		!isAntigravityQuotaExhausted(p.account, creditsResp.StatusCode, creditsRespBody) &&
+		!shouldMarkCreditsExhausted(creditsResp, creditsRespBody, nil) {
+		// Preserve unrelated errors rather than converting an auth/config/capacity
+		// failure into the original quota exhaustion.
+		creditsResp.Body = io.NopCloser(bytes.NewReader(creditsRespBody))
+		return &creditsOveragesRetryResult{handled: true, resp: creditsResp}
+	}
 	return &creditsOveragesRetryResult{handled: true}
 }
 
@@ -211,7 +221,7 @@ func (s *AntigravityGatewayService) handleCreditsRetryFailure(
 	account *Account,
 	creditsResp *http.Response,
 	reqErr error,
-) {
+) []byte {
 	var creditsRespBody []byte
 	creditsStatusCode := 0
 	if creditsResp != nil {
@@ -226,10 +236,11 @@ func (s *AntigravityGatewayService) handleCreditsRetryFailure(
 		s.setCreditsExhausted(ctx, account)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s credit_overages_failed model=%s account=%d marked_exhausted=true status=%d body=%s",
 			prefix, modelKey, account.ID, creditsStatusCode, truncateForLog(creditsRespBody, 200))
-		return
+		return creditsRespBody
 	}
 	if account != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s credit_overages_failed model=%s account=%d marked_exhausted=false status=%d err=%v body=%s",
 			prefix, modelKey, account.ID, creditsStatusCode, reqErr, truncateForLog(creditsRespBody, 200))
 	}
+	return creditsRespBody
 }
