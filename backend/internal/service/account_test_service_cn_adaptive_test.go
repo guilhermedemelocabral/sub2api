@@ -84,6 +84,9 @@ data: {"type":"response.completed"}
 
 func TestAccountTestService_AdaptiveChatOnlyProvidersTestChatAndAnthropicEndpoints(t *testing.T) {
 	account := adaptiveCNAccountTestAccount(301, PlatformZhipu)
+	// Chat-only provider: no native Responses endpoint is configured, so the
+	// adaptive flow must probe chat and Anthropic only.
+	delete(account.Credentials["api_base_urls"].(map[string]any), APIProtocolResponses)
 	svc, upstream := adaptiveCNAccountTestService(
 		account,
 		adaptiveCNChatTestResponse(),

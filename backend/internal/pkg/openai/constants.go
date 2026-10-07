@@ -117,6 +117,14 @@ func CanonicalizeOpenAIModelAliasSpelling(model string) string {
 	if strings.HasPrefix(normalized, "gpt5") {
 		normalized = "gpt-5" + strings.TrimPrefix(normalized, "gpt5")
 	}
+	// Compact spellings of GPT-6.1 Sol only. A bare "gpt6" stays untouched so
+	// it is not silently rewritten to the GPT-6 Astra alias.
+	for _, replacement := range []struct{ from, to string }{
+		{"gpt6.1sol", "gpt-6.1-sol"},
+		{"gpt6.1-sol", "gpt-6.1-sol"},
+	} {
+		normalized = strings.ReplaceAll(normalized, replacement.from, replacement.to)
+	}
 	if !strings.HasPrefix(normalized, "gpt-") && !strings.Contains(normalized, "codex") {
 		return ""
 	}
@@ -125,6 +133,7 @@ func CanonicalizeOpenAIModelAliasSpelling(model string) string {
 		from string
 		to   string
 	}{
+		{"gpt-6.1sol", "gpt-6.1-sol"},
 		{"gpt-5.4mini", "gpt-5.4-mini"},
 		{"gpt-5.4nano", "gpt-5.4-nano"},
 		{"gpt-5.3-codexspark", "gpt-5.3-codex-spark"},
@@ -138,7 +147,7 @@ func CanonicalizeOpenAIModelAliasSpelling(model string) string {
 }
 
 // CodexBaseInstructionsForModel 按模型返回最匹配的真实 Codex base instructions：
-//   - gpt-6 / gpt-6-astra（含供应商前缀与日期变体）→ GPT-6 Astra prompt
+//   - gpt-6 / gpt-6-astra / gpt-6.1-sol（含供应商前缀与日期变体）→ GPT-6 prompt
 //   - 含 "codex" 的模型（gpt-5-codex / gpt-5.x-codex / codex-max / spark 等）→ GPT-5-Codex prompt
 //   - gpt-5.5 系非 codex 模型 → GPT-5.5 prompt
 //   - gpt-5.2 系非 codex 模型 → GPT-5.2 prompt
@@ -179,6 +188,52 @@ func CodexBaseInstructionsForModel(model string) string {
 	return latestCodexInstructions()
 }
 
+// IsGPT61SolUnsupportedReasoningEffort reports efforts the GPT-6.1 Sol API rejects.
+// Official scale is low, medium (default), high, xhigh, and max.
+func IsGPT61SolUnsupportedReasoningEffort(effort string) bool {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none", "minimal":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsGPT61SolModelSpelling recognizes gpt-6.1-sol, provider prefixes, and the
+// local effort, compact, and dated snapshot suffixes already used for other GPT models.
+func IsGPT61SolModelSpelling(model string) bool {
+	canonical := CanonicalizeOpenAIModelAliasSpelling(model)
+	const base = "gpt-6.1-sol"
+	if canonical == base {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(canonical, base+"-")
+	if !ok || suffix == "" {
+		return false
+	}
+	switch suffix {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "openai-compact":
+		return true
+	default:
+		return isOpenAIModelDateSuffix(suffix)
+	}
+}
+
+func isOpenAIModelDateSuffix(suffix string) bool {
+	parts := strings.Split(suffix, "-")
+	if len(parts) != 3 || len(parts[0]) != 4 || len(parts[1]) != 2 || len(parts[2]) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // IsGPT6SolOrLunaModelSpelling recognizes official IDs and existing local effort/compact suffixes.
 func IsGPT6SolOrLunaModelSpelling(model string) bool {
 	canonical := CanonicalizeOpenAIModelAliasSpelling(model)
@@ -195,25 +250,6 @@ func IsGPT6SolOrLunaModelSpelling(model string) bool {
 		}
 	}
 	return false
-}
-
-// IsGPT61SolModelSpelling recognizes the published model and local effort/compact
-// spellings. Invalid effort suffixes remain identifiable for request validation.
-func IsGPT61SolModelSpelling(model string) bool {
-	canonical := CanonicalizeOpenAIModelAliasSpelling(model)
-	if canonical == "gpt-6.1-sol" {
-		return true
-	}
-	suffix, ok := strings.CutPrefix(canonical, "gpt-6.1-sol-")
-	if !ok {
-		return false
-	}
-	switch suffix {
-	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "openai-compact":
-		return true
-	default:
-		return false
-	}
 }
 
 // ValidateGPT61SolReasoningEffort rejects disabled reasoning instead of silently

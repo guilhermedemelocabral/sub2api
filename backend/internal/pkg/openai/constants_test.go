@@ -42,7 +42,7 @@ func TestGPT61SolModelIdentity(t *testing.T) {
 			break
 		}
 	}
-	require.Equal(t, "GPT-6.1-Sol", displayName)
+	require.Equal(t, "GPT-6.1 Sol", displayName)
 	for _, model := range []string{
 		"gpt-6.1-sol",
 		"openai/gpt-6.1-sol",

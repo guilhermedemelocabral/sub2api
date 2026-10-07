@@ -434,6 +434,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 }
 
+// handleAntigravityCompatEmptyStream ends an empty stream once the pre-content
+// keepalive already committed HTTP 200: failover is impossible, so the client
+// gets an in-band SSE error instead of a silent close.
 func handleAntigravityCompatEmptyStream(c *gin.Context, session *antigravityCompatStreamSession) (*antigravityStreamResult, error) {
 	if session.preContentKeepaliveSent {
 		writeAntigravityCompatStreamError(c, session.adapter, session.writer, "empty_stream")
