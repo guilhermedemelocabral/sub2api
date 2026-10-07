@@ -59,9 +59,14 @@ func TestAntigravityChatStream_MalformedAfterTextIsNotRetried(t *testing.T) {
 
 	textLine := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Vou consultar."}]}}]}}`
 	result, err := svc.handleChatCompletionsStreamingFromAntigravity(c, malformedStreamResponse(textLine, malformedGeminiLine), time.Now(), "gemini-3.8-flash-high", true)
-	require.NoError(t, err)
+	// Text already delivered: the corrupt tail must not be retried or masked as
+	// a clean finish; it is reported as an in-band SSE error instead.
+	require.ErrorContains(t, err, "malformed function call")
 	require.NotNil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.NotErrorAs(t, err, &failoverErr)
 	require.Contains(t, recorder.Body.String(), "Vou consultar.")
+	require.Contains(t, recorder.Body.String(), "malformed_function_call")
 }
 
 func TestAntigravityMessagesStream_MalformedBeforeOutputRetries(t *testing.T) {
@@ -89,8 +94,12 @@ func TestAntigravityMessagesStream_MalformedAfterTextIsNotRetried(t *testing.T) 
 
 	textLine := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Vou consultar."}]}}]}}`
 	result, err := svc.handleClaudeStreamingResponse(c, malformedStreamResponse(textLine, malformedGeminiLine), time.Now(), "gemini-3.8-flash-high")
-	require.NoError(t, err)
+	// Text already delivered: the corrupt tail must not be retried or masked as
+	// a clean finish; it is reported as an in-band SSE error instead.
+	require.ErrorContains(t, err, "malformed function call")
 	require.NotNil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.NotErrorAs(t, err, &failoverErr)
 	require.Contains(t, rec.Body.String(), "Vou consultar.")
-	require.Contains(t, rec.Body.String(), "message_stop")
+	require.Contains(t, rec.Body.String(), "malformed_function_call")
 }

@@ -72,7 +72,7 @@ func TestGPT61SolResponsesContract(t *testing.T) {
 
 func TestGPT61SolChatCompletionsToolAndEffortContract(t *testing.T) {
 	temperature := 0.4
-	for _, effort := range []string{"", "none", "minimal", "medium", "max"} {
+	for _, effort := range []string{"", "medium", "max"} {
 		out, err := apicompat.ChatCompletionsToResponses(&apicompat.ChatCompletionsRequest{
 			Model:           "gpt-6.1-sol",
 			ReasoningEffort: effort,
@@ -83,22 +83,41 @@ func TestGPT61SolChatCompletionsToolAndEffortContract(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, out.Temperature)
 		require.Nil(t, out.TopP)
-		if effort == "" || effort == "none" || effort == "minimal" {
+		if effort == "" {
 			require.Nil(t, out.Reasoning)
 		} else {
 			require.Equal(t, effort, out.Reasoning.Effort)
 		}
+	}
+	// Disabled reasoning is rejected outright instead of being silently
+	// upgraded to the smallest supported effort.
+	for _, effort := range []string{"none", "minimal"} {
+		_, err := apicompat.ChatCompletionsToResponses(&apicompat.ChatCompletionsRequest{
+			Model:           "gpt-6.1-sol",
+			ReasoningEffort: effort,
+			Temperature:     &temperature,
+			TopP:            &temperature,
+			Messages:        []apicompat.ChatMessage{{Role: "user", Content: []byte(`"hello"`)}},
+		})
+		require.ErrorContains(t, err, "does not support reasoning effort")
 	}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"public": "gpt-6.1-sol"}}}
-	_, err := (&OpenAIGatewayService{}).forwardAsRawChatCompletions(context.Background(), c, account, []byte(`{"model":"public","reasoning_effort":"none","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`), "")
+	_, err := (&OpenAIGatewayService{}).forwardAsRawChatCompletions(context.Background(), c, account, []byte(`{"model":"public","reasoning_effort":"medium","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`), "")
 	require.ErrorContains(t, err, "Responses API")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
-	body := []byte(`{"model":"gpt-6.1-sol","reasoning_effort":"none","temperature":0.7,"messages":[{"role":"user","content":"hello"}]}`)
+	// Disabled reasoning is rejected before any upstream call on every path.
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	_, rejErr := (&OpenAIGatewayService{}).forwardAsRawChatCompletions(context.Background(), c, account, []byte(`{"model":"public","reasoning_effort":"none","messages":[{"role":"user","content":"hello"}]}`), "")
+	require.ErrorContains(t, rejErr, "does not support reasoning effort")
+
+	body := []byte(`{"model":"gpt-6.1-sol","reasoning_effort":"medium","temperature":0.7,"messages":[{"role":"user","content":"hello"}]}`)
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -113,7 +132,7 @@ func TestGPT61SolChatCompletionsToolAndEffortContract(t *testing.T) {
 	}, body, "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.False(t, gjson.GetBytes(upstream.lastBody, "reasoning_effort").Exists())
+	require.Equal(t, "medium", gjson.GetBytes(upstream.lastBody, "reasoning_effort").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "temperature").Exists())
 	require.Equal(t, "gpt-6.1-sol", gjson.GetBytes(upstream.lastBody, "model").String())
 }
