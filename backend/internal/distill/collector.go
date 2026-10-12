@@ -138,6 +138,16 @@ func (c *Collector) Enqueue(line []byte) {
 	c.writer.Enqueue(line)
 }
 
+// NoteNormalizeDrop counts a turn rejected by Normalize and logs distill.turn_dropped
+// with reason=normalize only. The request body is not logged.
+func (c *Collector) NoteNormalizeDrop() {
+	if c == nil || c.writer == nil {
+		return
+	}
+	c.writer.dropped.Add(1)
+	slog.Warn("distill.turn_dropped", "reason", "normalize")
+}
+
 func (c *Collector) Close() error {
 	if c == nil {
 		return nil
@@ -338,4 +348,3 @@ func uploadPartOnce(ctx context.Context, dir, path string, api DriveAPI) error {
 	slog.Info("distill.part_uploaded", "part", name)
 	return nil
 }
-

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -434,6 +435,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	installDistillTap(c, h.gatewayService.Distill(), distill.ProtocolResponses)
 
 	setOpsRequestContext(c, "", false)
 	sessionHashBody := body
@@ -995,6 +997,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
+		if result != nil {
+			captureDistill(c, h.gatewayService.Distill(), distill.ProtocolResponses, result.ClientDisconnect, result.RequestID, result.Model, result.Stream, apiKey.ID, body)
+		}
 		submitResponsesUsage(result)
 		reqLog.Debug("openai.request_completed",
 			zap.Int64("account_id", account.ID),
@@ -1198,6 +1203,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	installDistillTap(c, h.gatewayService.Distill(), distill.ProtocolAnthropicMessages)
 
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
@@ -1547,6 +1553,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), true, nil)
 		}
 
+		if result != nil {
+			captureDistill(c, h.gatewayService.Distill(), distill.ProtocolAnthropicMessages, result.ClientDisconnect, result.RequestID, result.Model, result.Stream, apiKey.ID, body)
+		}
 		submitMessagesUsage(result)
 		reqLog.Debug("openai_messages.request_completed",
 			zap.Int64("account_id", account.ID),
