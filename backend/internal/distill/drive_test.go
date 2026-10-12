@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const testFolderID = "distill-folder-id"
@@ -138,7 +139,8 @@ func TestReconcileUploadsAndDeletesAfterLedger(t *testing.T) {
 	defer srv.Close()
 
 	d := newHTTPDriveForTest(srv)
-	if err := Reconcile(context.Background(), dir, openName, d); err != nil {
+	now := func() time.Time { return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC) }
+	if err := Reconcile(context.Background(), dir, now, d); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if uploadCount.Load() != 1 {
@@ -182,7 +184,8 @@ func TestReconcileRestartWithLedgerSkipsUpload(t *testing.T) {
 	defer srv.Close()
 
 	d := newHTTPDriveForTest(srv)
-	if err := Reconcile(context.Background(), dir, "", d); err != nil {
+	now := func() time.Time { return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC) }
+	if err := Reconcile(context.Background(), dir, now, d); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if uploadCount.Load() != 0 {
@@ -224,7 +227,8 @@ func TestReconcileFindByNameBackfillsLedger(t *testing.T) {
 	defer srv.Close()
 
 	d := newHTTPDriveForTest(srv)
-	if err := Reconcile(context.Background(), dir, "", d); err != nil {
+	now := func() time.Time { return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC) }
+	if err := Reconcile(context.Background(), dir, now, d); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if uploadBytes.Load() != 0 {
@@ -272,7 +276,8 @@ func TestReconcileUploadErrorKeepsJSONL(t *testing.T) {
 	defer srv.Close()
 
 	d := newHTTPDriveForTest(srv)
-	err := Reconcile(context.Background(), dir, "", d)
+	now := func() time.Time { return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC) }
+	err := Reconcile(context.Background(), dir, now, d)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -286,6 +291,31 @@ func TestReconcileUploadErrorKeepsJSONL(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "uploaded.json")); err == nil {
 		t.Fatal("ledger should not exist after failed upload")
 	}
+}
+
+func TestReconcileReadDirErrorDoesNotUpload(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	var calls atomic.Int32
+	err := Reconcile(context.Background(), dir, time.Now, driveAPIFunc(func(context.Context, string, io.ReadSeeker, int64) (string, error) {
+		calls.Add(1)
+		return "", nil
+	}))
+	if err == nil {
+		t.Fatal("expected ReadDir error")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upload calls = %d, want 0", calls.Load())
+	}
+}
+
+type driveAPIFunc func(context.Context, string, io.ReadSeeker, int64) (string, error)
+
+func (f driveAPIFunc) Upload(ctx context.Context, name string, r io.ReadSeeker, size int64) (string, error) {
+	return f(ctx, name, r, size)
+}
+
+func (driveAPIFunc) FindByName(context.Context, string) (string, bool, error) {
+	return "", false, nil
 }
 
 func mustReadAll(r io.Reader) []byte {

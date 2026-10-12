@@ -17,11 +17,24 @@ import (
 	"time"
 )
 
-var defaultDriveHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+var (
+	defaultDriveLookupClient = &http.Client{Timeout: 5 * time.Minute}
+	defaultDriveUploadClient = &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 5 * time.Minute,
+		},
+	}
+)
 
-// DefaultDriveHTTPClient is the timeout-bound client used when HTTPDrive.Client is nil.
+// DefaultDriveHTTPClient is the timeout-bound client used for Drive metadata lookups.
 func DefaultDriveHTTPClient() *http.Client {
-	return defaultDriveHTTPClient
+	return defaultDriveLookupClient
+}
+
+// DefaultDriveUploadHTTPClient has no overall request timeout so large part bodies can finish.
+func DefaultDriveUploadHTTPClient() *http.Client {
+	return defaultDriveUploadClient
 }
 
 type reconcilePartError struct {
@@ -47,18 +60,29 @@ type DriveAPI interface {
 }
 
 type HTTPDrive struct {
-	FolderID   string
-	Token      func(ctx context.Context) (string, error)
-	Client     *http.Client
-	UploadBase string
-	DriveBase  string
+	FolderID     string
+	Token        func(ctx context.Context) (string, error)
+	Client       *http.Client
+	UploadClient *http.Client
+	UploadBase   string
+	DriveBase    string
 }
 
-func (d *HTTPDrive) client() *http.Client {
+func (d *HTTPDrive) lookupClient() *http.Client {
 	if d.Client != nil {
 		return d.Client
 	}
-	return defaultDriveHTTPClient
+	return defaultDriveLookupClient
+}
+
+func (d *HTTPDrive) uploadClient() *http.Client {
+	if d.UploadClient != nil {
+		return d.UploadClient
+	}
+	if d.Client != nil {
+		return d.Client
+	}
+	return defaultDriveUploadClient
 }
 
 func (d *HTTPDrive) uploadBase() string {
@@ -111,7 +135,7 @@ func (d *HTTPDrive) Upload(ctx context.Context, name string, r io.ReadSeeker, si
 	req.Header.Set("X-Upload-Content-Type", "application/x-ndjson")
 	req.Header.Set("X-Upload-Content-Length", fmt.Sprintf("%d", size))
 
-	resp, err := d.client().Do(req)
+	resp, err := d.uploadClient().Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -136,7 +160,7 @@ func (d *HTTPDrive) Upload(ctx context.Context, name string, r io.ReadSeeker, si
 	putReq.Header.Set("Authorization", auth)
 	putReq.Header.Set("Content-Type", "application/x-ndjson")
 
-	putResp, err := d.client().Do(putReq)
+	putResp, err := d.uploadClient().Do(putReq)
 	if err != nil {
 		return "", err
 	}
@@ -181,7 +205,7 @@ func (d *HTTPDrive) FindByName(ctx context.Context, name string) (string, bool, 
 	}
 	req.Header.Set("Authorization", auth)
 
-	resp, err := d.client().Do(req)
+	resp, err := d.lookupClient().Do(req)
 	if err != nil {
 		return "", false, err
 	}
@@ -242,13 +266,20 @@ func saveLedger(dir string, ledger map[string]string) error {
 	return os.Rename(tmp, path)
 }
 
-func listClosedJSONL(dir, openName string) ([]string, error) {
-	spoolDir := filepath.Join(dir, "spool")
+func snapshotReconcileJSONL(dir string, now func() time.Time) (openName string, closed []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	var names []string
+	_, openPath, _, err := scanPartsEntries(dir, entries, now)
+	if err != nil {
+		return "", nil, err
+	}
+	if openPath != "" {
+		openName = filepath.Base(openPath)
+	}
+
+	spoolDir := filepath.Join(dir, "spool")
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -262,14 +293,14 @@ func listClosedJSONL(dir, openName string) ([]string, error) {
 		}
 		path := filepath.Join(dir, name)
 		if inSpool, err := isUnderDir(path, spoolDir); err != nil {
-			return nil, err
+			return "", nil, err
 		} else if inSpool {
 			continue
 		}
-		names = append(names, name)
+		closed = append(closed, name)
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Strings(closed)
+	return openName, closed, nil
 }
 
 func isUnderDir(path, dir string) (bool, error) {
@@ -288,8 +319,11 @@ func isUnderDir(path, dir string) (bool, error) {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)), nil
 }
 
-func Reconcile(ctx context.Context, dir, openName string, api DriveAPI) error {
-	names, err := listClosedJSONL(dir, openName)
+func Reconcile(ctx context.Context, dir string, now func() time.Time, api DriveAPI) error {
+	if now == nil {
+		now = time.Now
+	}
+	_, names, err := snapshotReconcileJSONL(dir, now)
 	if err != nil {
 		return err
 	}

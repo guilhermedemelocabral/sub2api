@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -133,6 +134,13 @@ func scanParts(dir string, now func() time.Time) (closed []string, openPath stri
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, "", 0, err
+	}
+	return scanPartsEntries(dir, entries, now)
+}
+
+func scanPartsEntries(dir string, entries []fs.DirEntry, now func() time.Time) (closed []string, openPath string, openSize int64, err error) {
+	if now == nil {
+		now = time.Now
 	}
 	today := utcDate(now())
 	type part struct {

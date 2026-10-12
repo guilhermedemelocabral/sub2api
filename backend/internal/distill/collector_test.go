@@ -360,7 +360,7 @@ func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 	closedPath := filepath.Join(dir, "2006-01-01-001.jsonl")
 	require.NoError(t, os.WriteFile(closedPath, []byte("x\n"), 0o600))
 
-	require.Equal(t, 5*time.Minute, DefaultDriveHTTPClient().Timeout)
+	require.Equal(t, time.Duration(0), DefaultDriveUploadHTTPClient().Timeout)
 
 	entered := make(chan struct{})
 	var once sync.Once
@@ -375,11 +375,11 @@ func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 	defer srv.Close()
 
 	drive := &HTTPDrive{
-		FolderID:   testFolderID,
-		Token:      testToken,
-		UploadBase: srv.URL,
-		DriveBase:  srv.URL,
-		Client:     &http.Client{Timeout: 5 * time.Minute},
+		FolderID:     testFolderID,
+		Token:        testToken,
+		UploadBase:   srv.URL,
+		DriveBase:    srv.URL,
+		UploadClient: DefaultDriveUploadHTTPClient(),
 	}
 
 	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)

@@ -144,8 +144,7 @@ func (c *Collector) Close() error {
 	}
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
-		// Unblock an in-flight Drive call. The 5 minute client timeout remains
-		// the backstop only for attempts that are not shutting down.
+		// Cancel in-flight Drive uploads; upload HTTP has no overall timeout.
 		if c.cancelUpload != nil {
 			c.cancelUpload()
 		}
@@ -172,9 +171,8 @@ func (c *Collector) startStartupReconcile() {
 				return
 			default:
 			}
-			openName := openPartBaseName(c.dir, c.now)
 			c.uploadMu.Lock()
-			err := Reconcile(c.uploadCtx, c.dir, openName, c.drive)
+			err := Reconcile(c.uploadCtx, c.dir, c.now, c.drive)
 			c.uploadMu.Unlock()
 			if err == nil {
 				c.reconcileSynced.Store(true)
@@ -341,14 +339,3 @@ func uploadPartOnce(ctx context.Context, dir, path string, api DriveAPI) error {
 	return nil
 }
 
-// openPartBaseName is the writer's open part: the highest NNN for today's UTC date.
-func openPartBaseName(dir string, now func() time.Time) string {
-	if now == nil {
-		now = time.Now
-	}
-	_, openPath, _, err := scanParts(dir, now)
-	if err != nil || openPath == "" {
-		return ""
-	}
-	return filepath.Base(openPath)
-}
