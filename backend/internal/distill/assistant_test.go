@@ -108,6 +108,24 @@ func TestTapResponsesJSON(t *testing.T) {
 	require.Equal(t, `{}`, msg.ToolCalls[0].Function.Arguments)
 }
 
+func TestTapAnthropicTextBlockStartIndex1(t *testing.T) {
+	tap := NewTap(ProtocolAnthropicMessages)
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_text","type":"message","role":"assistant","model":"claude","content":[]}}`,
+		``,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		``,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}}`,
+		``,
+	}, "\n")
+	tap.Feed([]byte(sse))
+
+	msg, id, ok := tap.Finish()
+	require.True(t, ok)
+	require.Equal(t, "msg_text", id)
+	require.Equal(t, "hello", contentString(t, msg))
+}
+
 func TestTapErrorJSONOkFalse(t *testing.T) {
 	tap := NewTap(ProtocolAnthropicMessages)
 	tap.Feed([]byte(`{"type":"error"}`))

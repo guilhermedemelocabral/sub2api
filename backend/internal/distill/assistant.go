@@ -25,6 +25,7 @@ type Tap struct {
 	reasoning  strings.Builder
 	toolCalls  []apicompat.ChatToolCall
 	toolArgs   map[int]*strings.Builder
+	textBlocks map[int]struct{}
 
 	chatJSONDone bool
 	chatMessage  apicompat.ChatMessage
@@ -36,8 +37,9 @@ type Tap struct {
 // NewTap returns a Tap for the given distill protocol constant.
 func NewTap(protocol string) *Tap {
 	t := &Tap{
-		protocol: protocol,
-		toolArgs: make(map[int]*strings.Builder),
+		protocol:   protocol,
+		toolArgs:   make(map[int]*strings.Builder),
+		textBlocks: make(map[int]struct{}),
 	}
 	if protocol == ProtocolResponses {
 		t.responsesAcc = apicompat.NewBufferedResponseAccumulator()
@@ -287,6 +289,8 @@ func (t *Tap) parseAnthropicEvent(payload, typ string) {
 			return
 		}
 		switch evt.ContentBlock.Type {
+		case "text":
+			t.textBlocks[evt.Index] = struct{}{}
 		case "tool_use":
 			for len(t.toolCalls) <= evt.Index {
 				t.toolCalls = append(t.toolCalls, apicompat.ChatToolCall{})
