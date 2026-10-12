@@ -298,6 +298,63 @@ func TestCollectorReconcileRetrySkipsPartOpenedDuringBackoff(t *testing.T) {
 	require.NotContains(t, logs, "closed-yesterday")
 }
 
+func TestCollectorPartClosedDuringReconcileRetryUploadedOnce(t *testing.T) {
+	dir := t.TempDir()
+	yesterdayName := "2006-01-01-001.jsonl"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, yesterdayName), []byte("yesterday\n"), 0o600))
+
+	today := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
+	var c *Collector
+	var midRetryPart string
+
+	drive := &recordingFailOnceDrive{id: "remote-id"}
+	c = NewCollector(CollectorConfig{
+		Enabled:      true,
+		Dir:          dir,
+		QueueSize:    8,
+		QueueBytes:   1 << 20,
+		PartBytes:    1,
+		DriveEnabled: true,
+		Drive:        drive,
+		Now:          func() time.Time { return today },
+		Backoff: func(attempt int) time.Duration {
+			if attempt == 0 && c != nil {
+				c.Enqueue([]byte("a\n"))
+				c.Enqueue([]byte("b\n"))
+				midRetryPart = filepath.Join(dir, "2006-01-02-001.jsonl")
+			}
+			return 0
+		},
+		AutoUpload: true,
+	})
+	require.True(t, c.Enabled())
+	t.Cleanup(func() { _ = c.Close() })
+
+	require.Eventually(t, func() bool {
+		if midRetryPart == "" {
+			return false
+		}
+		_, err := os.Stat(midRetryPart)
+		return os.IsNotExist(err)
+	}, 5*time.Second, 5*time.Millisecond)
+
+	require.NotEmpty(t, midRetryPart)
+	partBase := filepath.Base(midRetryPart)
+
+	uploaded := drive.uploaded()
+	var count int
+	for _, name := range uploaded {
+		if name == partBase {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "uploaded names: %v", uploaded)
+
+	ledger, err := loadLedger(dir)
+	require.NoError(t, err)
+	require.Equal(t, "remote-id", ledger[partBase])
+}
+
 func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 	dir := t.TempDir()
 	closedPath := filepath.Join(dir, "2006-01-01-001.jsonl")

@@ -40,6 +40,7 @@ type Collector struct {
 	cancelUpload context.CancelFunc
 
 	reconcileSynced atomic.Bool
+	uploadMu        sync.Mutex
 
 	stopOnce    sync.Once
 	stopCh      chan struct{}
@@ -172,7 +173,9 @@ func (c *Collector) startStartupReconcile() {
 			default:
 			}
 			openName := openPartBaseName(c.dir, c.now)
+			c.uploadMu.Lock()
 			err := Reconcile(c.uploadCtx, c.dir, openName, c.drive)
+			c.uploadMu.Unlock()
 			if err == nil {
 				c.reconcileSynced.Store(true)
 				return
@@ -203,13 +206,6 @@ func (c *Collector) startStartupReconcile() {
 func (c *Collector) watchClosedParts(now func() time.Time) {
 	defer c.watchWg.Done()
 	seen := make(map[string]struct{})
-	var startupPending map[string]struct{}
-	if c.driveEnabled && c.drive != nil && c.writer != nil {
-		startupPending = make(map[string]struct{})
-		for _, p := range c.writer.ClosedParts() {
-			startupPending[p] = struct{}{}
-		}
-	}
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -224,10 +220,8 @@ func (c *Collector) watchClosedParts(now func() time.Time) {
 				if _, ok := seen[p]; ok {
 					continue
 				}
-				if startupPending != nil {
-					if _, pending := startupPending[p]; pending && !c.reconcileSynced.Load() {
-						continue
-					}
+				if c.driveEnabled && c.drive != nil && !c.reconcileSynced.Load() {
+					continue
 				}
 				seen[p] = struct{}{}
 				select {
@@ -266,7 +260,9 @@ func (c *Collector) uploadPartWithRetry(ctx context.Context, path string) error 
 			return context.Canceled
 		default:
 		}
+		c.uploadMu.Lock()
 		err := uploadPartOnce(ctx, c.dir, path, c.drive)
+		c.uploadMu.Unlock()
 		if err == nil {
 			return nil
 		}
