@@ -3,6 +3,7 @@ package distill
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,6 +42,14 @@ type Writer struct {
 	partDate string
 	partSeq  int
 
+	hooks        atomic.Pointer[partHooks]
+	beforeInsert func(seq uint64, path string)
+
+	rejectEnqueue bool
+	closing       bool
+	drainDeadline time.Time
+	acceptedMax   uint64
+
 	closeOnce sync.Once
 	closeCh   chan struct{}
 	done      chan struct{}
@@ -50,6 +59,12 @@ type queueItem struct {
 	line      []byte
 	spoolPath string
 	failed    bool
+}
+
+// partHooks lets tests inject a short write or a failing truncate.
+type partHooks struct {
+	write    func(*os.File, []byte) (int, error)
+	truncate func(*os.File, int64) error
 }
 
 func NewWriter(dir string, queueSize int, queueBytes, partBytes int64, now func() time.Time) (*Writer, error) {
@@ -183,10 +198,15 @@ func scanParts(dir string, now func() time.Time) (closed []string, openPath stri
 }
 
 func (w *Writer) Enqueue(line []byte) {
-	seq := w.seq.Add(1)
 	lineCopy := append([]byte(nil), line...)
 
 	w.mu.Lock()
+	if w.rejectEnqueue {
+		w.mu.Unlock()
+		w.dropped.Add(1)
+		return
+	}
+	seq := w.seq.Add(1)
 	if len(w.pending) < w.queueSize && w.memBytes+int64(len(lineCopy)) <= w.queueBytes {
 		w.pending[seq] = &queueItem{line: lineCopy}
 		w.memBytes += int64(len(lineCopy))
@@ -228,15 +248,39 @@ func (w *Writer) spillToDisk(seq uint64, line []byte) {
 		w.insertFailed(seq)
 		return
 	}
+	if w.beforeInsert != nil {
+		w.beforeInsert(seq, finalPath)
+	}
+	w.insertSpool(seq, finalPath)
+}
 
+func (w *Writer) insertSpool(seq uint64, path string) {
 	w.mu.Lock()
-	w.pending[seq] = &queueItem{spoolPath: finalPath}
+	if seq < w.nextWrite {
+		w.mu.Unlock()
+		_ = os.Remove(path)
+		return
+	}
+	if _, exists := w.pending[seq]; exists {
+		w.mu.Unlock()
+		_ = os.Remove(path)
+		return
+	}
+	w.pending[seq] = &queueItem{spoolPath: path}
 	w.mu.Unlock()
 	w.poke()
 }
 
 func (w *Writer) insertFailed(seq uint64) {
 	w.mu.Lock()
+	if seq < w.nextWrite {
+		w.mu.Unlock()
+		return
+	}
+	if _, exists := w.pending[seq]; exists {
+		w.mu.Unlock()
+		return
+	}
 	w.pending[seq] = &queueItem{failed: true}
 	w.mu.Unlock()
 	w.dropped.Add(1)
@@ -251,122 +295,143 @@ func (w *Writer) poke() {
 }
 
 func (w *Writer) run() {
-	defer close(w.done)
-	var closing bool
-	var drainDeadline time.Time
+	defer func() {
+		if w.partFile != nil {
+			_ = w.partFile.Close()
+			w.partFile = nil
+		}
+		close(w.done)
+	}()
 
 	for {
-		written := w.tryWriteNext(closing, drainDeadline)
-		if written {
-			continue
-		}
-
-		if closing && time.Now().After(drainDeadline) {
-			w.abandonRemaining()
-			if w.partFile != nil {
-				w.partFile.Close()
-				w.partFile = nil
-			}
+		closing, deadline, accepted := w.closeState()
+		if closing && !time.Now().Before(deadline) {
+			w.abandonThrough(accepted)
 			return
 		}
-
-		if closing {
-			time.Sleep(5 * time.Millisecond)
+		if w.tryWriteNext() {
 			continue
 		}
-
+		if closing {
+			if w.drained(accepted) {
+				return
+			}
+			w.waitWork(deadline)
+			continue
+		}
 		select {
 		case <-w.closeCh:
-			closing = true
-			drainDeadline = time.Now().Add(2 * time.Second)
 		case <-w.notify:
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
 
-func (w *Writer) tryWriteNext(closing bool, drainDeadline time.Time) bool {
+func (w *Writer) closeState() (closing bool, deadline time.Time, accepted uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closing, w.drainDeadline, w.acceptedMax
+}
+
+func (w *Writer) drained(accepted uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.pending[w.nextWrite]; ok {
+		return false
+	}
+	return w.nextWrite > accepted
+}
+
+func (w *Writer) waitWork(deadline time.Time) {
+	d := time.Until(deadline)
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	select {
+	case <-w.notify:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	case <-timer.C:
+	}
+}
+
+func (w *Writer) tryWriteNext() bool {
 	w.mu.Lock()
 	item, ok := w.pending[w.nextWrite]
 	if !ok {
 		w.mu.Unlock()
-		if closing && time.Now().After(drainDeadline) {
-			max := w.seq.Load()
-			if w.nextWrite <= max {
-				w.dropped.Add(1)
-				w.nextWrite++
-				return true
-			}
-		}
 		return false
 	}
 	delete(w.pending, w.nextWrite)
 	if len(item.line) > 0 {
 		w.memBytes -= int64(len(item.line))
 	}
-	seq := w.nextWrite
 	w.nextWrite++
 	w.mu.Unlock()
-
-	if item.failed {
-		return true
-	}
-
-	line := item.line
-	if item.spoolPath != "" {
-		data, err := os.ReadFile(item.spoolPath)
-		os.Remove(item.spoolPath)
-		if err != nil {
-			w.dropped.Add(1)
-			return true
-		}
-		line = data
-	}
-
-	if err := w.appendLine(line); err != nil {
-		w.dropped.Add(1)
-		return true
-	}
-	w.written.Add(1)
-	_ = seq
+	w.commitItem(item)
 	return true
 }
 
-func (w *Writer) abandonRemaining() {
-	max := w.seq.Load()
-	for w.nextWrite <= max {
+func (w *Writer) commitItem(item *queueItem) {
+	if item.failed {
+		return
+	}
+	line := item.line
+	if item.spoolPath != "" {
+		data, err := os.ReadFile(item.spoolPath)
+		_ = os.Remove(item.spoolPath)
+		if err != nil {
+			w.dropped.Add(1)
+			return
+		}
+		line = data
+	}
+	if err := w.appendLine(line); err != nil {
+		w.dropped.Add(1)
+		return
+	}
+	w.written.Add(1)
+}
+
+func (w *Writer) abandonThrough(max uint64) {
+	for {
 		w.mu.Lock()
+		if w.nextWrite > max {
+			w.mu.Unlock()
+			return
+		}
 		item, ok := w.pending[w.nextWrite]
 		if ok {
 			delete(w.pending, w.nextWrite)
 			if len(item.line) > 0 {
 				w.memBytes -= int64(len(item.line))
 			}
-			w.mu.Unlock()
-			if !item.failed {
-				line := item.line
-				if item.spoolPath != "" {
-					data, err := os.ReadFile(item.spoolPath)
-					os.Remove(item.spoolPath)
-					if err != nil {
-						w.dropped.Add(1)
-						w.nextWrite++
-						continue
-					}
-					line = data
-				}
-				if err := w.appendLine(line); err != nil {
-					w.dropped.Add(1)
-				} else {
-					w.written.Add(1)
-				}
-			}
-			w.nextWrite++
+		}
+		w.nextWrite++
+		w.mu.Unlock()
+		if !ok {
+			w.dropped.Add(1)
 			continue
 		}
-		w.mu.Unlock()
+		w.discard(item)
+	}
+}
+
+func (w *Writer) discard(item *queueItem) {
+	if item == nil {
 		w.dropped.Add(1)
-		w.nextWrite++
+		return
+	}
+	if item.spoolPath != "" {
+		_ = os.Remove(item.spoolPath)
+	}
+	if !item.failed {
+		w.dropped.Add(1)
 	}
 }
 
@@ -374,18 +439,45 @@ func (w *Writer) appendLine(line []byte) error {
 	if err := w.ensurePart(len(line)); err != nil {
 		return err
 	}
-	n, err := w.partFile.Write(line)
-	if err != nil {
+	prev := w.partSize
+	n, err := w.writePart(w.partFile, line)
+	if n < len(line) {
+		if n > 0 {
+			if rerr := w.rewindPart(prev); rerr != nil {
+				w.abandonOpenPart()
+			}
+		}
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return err
 	}
 	w.partSize += int64(n)
+	return err
+}
+
+func (w *Writer) rewindPart(size int64) error {
+	if w.partFile == nil {
+		return errors.New("distill writer: no open part")
+	}
+	if err := w.truncatePart(w.partFile, size); err != nil {
+		return err
+	}
+	if _, err := w.partFile.Seek(size, io.SeekStart); err != nil {
+		return err
+	}
+	w.partSize = size
 	return nil
 }
 
 func (w *Writer) ensurePart(lineLen int) error {
 	today := utcDate(w.now())
 	if w.partFile == nil {
-		return w.openNewPart(today, 1)
+		num := 1
+		if w.partSeq > 0 && w.partDate == today {
+			num = w.partSeq + 1
+		}
+		return w.openNewPart(today, num)
 	}
 	if today != w.partDate {
 		if err := w.rotatePart(); err != nil {
@@ -400,6 +492,20 @@ func (w *Writer) ensurePart(lineLen int) error {
 		return w.openNextPartSameDay()
 	}
 	return nil
+}
+
+func (w *Writer) writePart(f *os.File, p []byte) (int, error) {
+	if h := w.hooks.Load(); h != nil && h.write != nil {
+		return h.write(f, p)
+	}
+	return f.Write(p)
+}
+
+func (w *Writer) truncatePart(f *os.File, size int64) error {
+	if h := w.hooks.Load(); h != nil && h.truncate != nil {
+		return h.truncate(f, size)
+	}
+	return f.Truncate(size)
 }
 
 func (w *Writer) openNextPartSameDay() error {
@@ -417,25 +523,67 @@ func (w *Writer) rotatePart() error {
 	w.partFile = nil
 	w.partPath = ""
 	w.partSize = 0
-	w.closedMu.Lock()
-	w.closedParts = append(w.closedParts, path)
-	w.closedMu.Unlock()
+	w.noteClosed(path)
 	return nil
 }
 
+func (w *Writer) abandonOpenPart() {
+	if w.partFile == nil {
+		return
+	}
+	path := w.partPath
+	_ = w.partFile.Close()
+	w.partFile = nil
+	w.partPath = ""
+	w.partSize = 0
+	w.noteClosed(path)
+}
+
+func (w *Writer) noteClosed(path string) {
+	if path == "" {
+		return
+	}
+	w.closedMu.Lock()
+	defer w.closedMu.Unlock()
+	for _, existing := range w.closedParts {
+		if existing == path {
+			return
+		}
+	}
+	w.closedParts = append(w.closedParts, path)
+}
+
+func (w *Writer) isClosed(path string) bool {
+	w.closedMu.RLock()
+	defer w.closedMu.RUnlock()
+	for _, existing := range w.closedParts {
+		if existing == path {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Writer) openNewPart(date string, num int) error {
+	if num < 1 {
+		return fmt.Errorf("distill writer: invalid part number %d", num)
+	}
 	name := fmt.Sprintf("%s-%03d.jsonl", date, num)
 	path := filepath.Join(w.dir, name)
+	if w.isClosed(path) {
+		return fmt.Errorf("distill writer: refusing to reopen closed part %s", path)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	w.partFile = f
-	w.partPath = path
 	st, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return err
 	}
+	w.partFile = f
+	w.partPath = path
 	w.partSize = st.Size()
 	w.partDate = date
 	w.partSeq = num
@@ -444,6 +592,12 @@ func (w *Writer) openNewPart(date string, num int) error {
 
 func (w *Writer) Close() error {
 	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		w.rejectEnqueue = true
+		w.acceptedMax = w.seq.Load()
+		w.drainDeadline = time.Now().Add(2 * time.Second)
+		w.closing = true
+		w.mu.Unlock()
 		close(w.closeCh)
 	})
 	<-w.done
