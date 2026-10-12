@@ -261,7 +261,7 @@ func TestReconcileUploadErrorKeepsJSONL(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"files":[]}`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/upload/drive/v3/files"):
-			w.Header().Set("Location", r.URL.Scheme+"://"+r.Host+"/upload/session")
+			w.Header().Set("Location", uploadSessionURL(r))
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPut:
 			w.WriteHeader(http.StatusInternalServerError)
