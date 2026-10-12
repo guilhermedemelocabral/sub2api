@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -59,6 +60,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	installDistillTap(c, h.gatewayService.Distill(), distill.ProtocolChatCompletions)
 
 	setOpsRequestContext(c, "", false)
 
@@ -351,6 +353,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 
 		// 6. Record usage
+		if result != nil {
+			captureDistill(c, h.gatewayService.Distill(), distill.ProtocolChatCompletions, result.ClientDisconnect, result.RequestID, result.Model, result.Stream, apiKey.ID, body)
+		}
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)

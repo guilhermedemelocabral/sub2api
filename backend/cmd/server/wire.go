@@ -6,12 +6,15 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
@@ -28,6 +31,7 @@ type Application struct {
 	Server        *http.Server
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
+	Distill       *distill.Collector
 	Cleanup       func()
 }
 
@@ -57,8 +61,11 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		// Cleanup function provider
 		provideCleanup,
 
+		provideDistillCredentials,
+		provideDistillCollector,
+
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Distill", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -79,6 +86,59 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideDistillCredentials(
+	cfg *config.Config,
+	settingRepo service.SettingRepository,
+	encryptor service.SecretEncryptor,
+) *service.DistillCredentials {
+	return service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
+}
+
+func provideDistillCollector(
+	cfg *config.Config,
+	creds *service.DistillCredentials,
+	gateway *service.GatewayService,
+	openAIGateway *service.OpenAIGatewayService,
+) *distill.Collector {
+	refresh, secret, err := creds.Load(context.Background())
+	if err != nil {
+		slog.Error("distill.drive_disabled", "err", err)
+		refresh = ""
+		secret = ""
+	}
+	driveEnabled := cfg.Distill.Drive.Enabled &&
+		strings.TrimSpace(cfg.Distill.Drive.FolderID) != "" &&
+		strings.TrimSpace(cfg.Distill.Drive.ClientID) != "" &&
+		strings.TrimSpace(refresh) != "" &&
+		strings.TrimSpace(secret) != ""
+
+	var drive distill.DriveAPI
+	if driveEnabled {
+		drive = &distill.HTTPDrive{
+			FolderID: cfg.Distill.Drive.FolderID,
+			Token:    creds.AccessToken,
+		}
+	}
+
+	collector := distill.NewCollector(distill.CollectorConfig{
+		Enabled:      cfg.Distill.Enabled,
+		Dir:          cfg.Distill.Dir,
+		QueueSize:    cfg.Distill.QueueSize,
+		QueueBytes:   cfg.Distill.QueueBytes,
+		PartBytes:    cfg.Distill.PartBytes,
+		DriveEnabled: driveEnabled,
+		Drive:        drive,
+		AutoUpload:   true,
+	})
+	if gateway != nil {
+		gateway.SetDistill(collector)
+	}
+	if openAIGateway != nil {
+		openAIGateway.SetDistill(collector)
+	}
+	return collector
 }
 
 func provideCleanup(
@@ -130,6 +190,7 @@ func provideCleanup(
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	distillCollector *distill.Collector,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -142,6 +203,12 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"DistillCollector", func() error {
+				if distillCollector != nil {
+					return distillCollector.Close()
+				}
+				return nil
+			}},
 			{"PluginManager", func() error {
 				if pluginManager != nil {
 					pluginManager.Stop()

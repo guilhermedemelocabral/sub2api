@@ -106,6 +106,7 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	Distill                 DistillConfig                 `mapstructure:"distill"`
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
@@ -125,6 +126,21 @@ type PluginConfig struct {
 	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
 	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
 	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
+}
+
+type DistillConfig struct {
+	Enabled    bool               `mapstructure:"enabled"`
+	Dir        string             `mapstructure:"dir"`
+	QueueSize  int                `mapstructure:"queue_size"`
+	QueueBytes int64              `mapstructure:"queue_bytes"`
+	PartBytes  int64              `mapstructure:"part_bytes"`
+	Drive      DistillDriveConfig `mapstructure:"drive"`
+}
+
+type DistillDriveConfig struct {
+	Enabled  bool   `mapstructure:"enabled"`
+	FolderID string `mapstructure:"folder_id"`
+	ClientID string `mapstructure:"client_id"`
 }
 
 type LogConfig struct {
@@ -2354,6 +2370,13 @@ func setDefaults() {
 	viper.SetDefault("plugins.max_upload_bytes", int64(128*1024*1024))
 	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
 	viper.SetDefault("plugins.start_timeout_seconds", 15)
+
+	viper.SetDefault("distill.enabled", false)
+	viper.SetDefault("distill.dir", "data/distill")
+	viper.SetDefault("distill.queue_size", 256)
+	viper.SetDefault("distill.queue_bytes", int64(67108864))
+	viper.SetDefault("distill.part_bytes", int64(1073741824))
+	viper.SetDefault("distill.drive.enabled", false)
 
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")

@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -62,6 +64,11 @@ type SettingHandler struct {
 	notificationEmailService *service.NotificationEmailService
 	totpService              *service.TotpService
 	userService              *service.UserService
+	distillCredentials       distillCredentialsSaver
+}
+
+type distillCredentialsSaver interface {
+	Save(ctx context.Context, refreshToken, clientSecret string) error
 }
 
 // NewSettingHandler 创建系统设置处理器
@@ -81,6 +88,12 @@ func NewSettingHandler(settingService *service.SettingService, emailService *ser
 // the constructor signature used by existing unit tests.
 func (h *SettingHandler) SetNotificationEmailService(notificationEmailService *service.NotificationEmailService) {
 	h.notificationEmailService = notificationEmailService
+}
+
+// SetDistillCredentials attaches encrypted Drive OAuth persistence without changing
+// the constructor signature used by existing unit tests.
+func (h *SettingHandler) SetDistillCredentials(creds distillCredentialsSaver) {
+	h.distillCredentials = creds
 }
 
 // SetAliyunCaptchaService attaches the Aliyun captcha credential validator without
@@ -538,4 +551,32 @@ func systemSettingsResponseData(settings dto.SystemSettings, authSourceDefaults 
 	data["force_email_on_third_party_signup"] = authSourceDefaults.ForceEmailOnThirdPartySignup
 
 	return data
+}
+
+// UpdateDistillDriveCredentials stores encrypted Google Drive OAuth secrets.
+// PUT /api/v1/admin/settings/distill-drive-credentials
+func (h *SettingHandler) UpdateDistillDriveCredentials(c *gin.Context) {
+	if h.distillCredentials == nil {
+		response.InternalError(c, "distill drive credentials are not configured")
+		return
+	}
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	refreshToken := strings.TrimSpace(req.RefreshToken)
+	clientSecret := strings.TrimSpace(req.ClientSecret)
+	if refreshToken == "" || clientSecret == "" {
+		response.BadRequest(c, "refresh_token and client_secret are required")
+		return
+	}
+	if err := h.distillCredentials.Save(c.Request.Context(), refreshToken, clientSecret); err != nil {
+		response.InternalError(c, "failed to save distill drive credentials")
+		return
+	}
+	c.AbortWithStatus(http.StatusNoContent)
 }

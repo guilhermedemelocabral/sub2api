@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -157,6 +158,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	installDistillTap(c, h.gatewayService.Distill(), distill.ProtocolAnthropicMessages)
 
 	setOpsRequestContext(c, "", false)
 
@@ -596,6 +598,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			forceCacheBilling := fs.ForceCacheBilling
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
+			if result != nil {
+				captureDistill(c, h.gatewayService.Distill(), distill.ProtocolAnthropicMessages, result.ClientDisconnect, result.RequestID, result.Model, result.Stream, apiKey.ID, body)
+			}
 			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
@@ -1130,6 +1135,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 
+			if result != nil {
+				captureDistill(c, h.gatewayService.Distill(), distill.ProtocolAnthropicMessages, result.ClientDisconnect, result.RequestID, result.Model, result.Stream, currentAPIKey.ID, body)
+			}
 			submitForwardUsage(result)
 			// 转发成功，会话槽保持既有空闲超时语义
 			upstreamServedSession = true
