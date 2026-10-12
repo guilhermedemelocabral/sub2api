@@ -61,10 +61,11 @@ type queueItem struct {
 	failed    bool
 }
 
-// partHooks lets tests inject a short write or a failing truncate.
+// partHooks lets tests inject a short write, a failing truncate, or a failing close.
 type partHooks struct {
 	write    func(*os.File, []byte) (int, error)
 	truncate func(*os.File, int64) error
+	close    func(*os.File) error
 }
 
 func NewWriter(dir string, queueSize int, queueBytes, partBytes int64, now func() time.Time) (*Writer, error) {
@@ -508,6 +509,13 @@ func (w *Writer) truncatePart(f *os.File, size int64) error {
 	return f.Truncate(size)
 }
 
+func (w *Writer) closePart(f *os.File) error {
+	if h := w.hooks.Load(); h != nil && h.close != nil {
+		return h.close(f)
+	}
+	return f.Close()
+}
+
 func (w *Writer) openNextPartSameDay() error {
 	return w.openNewPart(w.partDate, w.partSeq+1)
 }
@@ -517,14 +525,12 @@ func (w *Writer) rotatePart() error {
 		return nil
 	}
 	path := w.partPath
-	if err := w.partFile.Close(); err != nil {
-		return err
-	}
+	err := w.closePart(w.partFile)
 	w.partFile = nil
 	w.partPath = ""
 	w.partSize = 0
 	w.noteClosed(path)
-	return nil
+	return err
 }
 
 func (w *Writer) abandonOpenPart() {
@@ -532,7 +538,7 @@ func (w *Writer) abandonOpenPart() {
 		return
 	}
 	path := w.partPath
-	_ = w.partFile.Close()
+	_ = w.closePart(w.partFile)
 	w.partFile = nil
 	w.partPath = ""
 	w.partSize = 0

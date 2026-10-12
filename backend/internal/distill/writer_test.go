@@ -230,6 +230,58 @@ func TestWriterCloseCapsDespiteEnqueue(t *testing.T) {
 	require.Less(t, time.Since(start), 3*time.Second)
 }
 
+func TestWriterRotatePartCloseErrorAdvancesState(t *testing.T) {
+	dir := t.TempDir()
+	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
+	line1 := []byte("0123456789\n")
+	w, err := NewWriter(dir, 8, 1<<20, 12, func() time.Time { return day })
+	require.NoError(t, err)
+
+	var closeCalls int
+	var closeMu sync.Mutex
+	w.hooks.Store(&partHooks{
+		close: func(f *os.File) error {
+			closeMu.Lock()
+			closeCalls++
+			n := closeCalls
+			closeMu.Unlock()
+			if n == 1 {
+				if err := f.Close(); err != nil {
+					return err
+				}
+				return errors.New("close failed")
+			}
+			return f.Close()
+		},
+	})
+
+	w.Enqueue(line1)
+	require.Eventually(t, func() bool { return w.Written() >= 1 }, time.Second, 5*time.Millisecond)
+
+	line2 := []byte("abcdefghijklmnop\n")
+	line3 := []byte("x") // fits in part 001 (11+1) but must land in part 002 after failed rotate
+	w.Enqueue(line2)
+	w.Enqueue(line3)
+	require.NoError(t, w.Close())
+
+	part1 := filepath.Join(dir, "2006-01-02-001.jsonl")
+	part2 := filepath.Join(dir, "2006-01-02-002.jsonl")
+	require.Contains(t, w.ClosedParts(), part1)
+
+	data1, err := os.ReadFile(part1)
+	require.NoError(t, err)
+	require.Equal(t, string(line1), string(data1))
+
+	require.FileExists(t, part2)
+	data2, err := os.ReadFile(part2)
+	require.NoError(t, err)
+	require.Equal(t, string(line3), string(data2))
+	require.NotContains(t, string(data2), string(line2))
+
+	require.Equal(t, int64(2), w.Written())
+	require.Equal(t, int64(1), w.Dropped())
+}
+
 func TestWriterFailedRotationDoesNotReopenClosedPart(t *testing.T) {
 	dir := t.TempDir()
 	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
