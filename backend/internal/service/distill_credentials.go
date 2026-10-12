@@ -20,10 +20,10 @@ const (
 
 // DistillCredentials loads encrypted Drive OAuth secrets and refreshes access tokens.
 type DistillCredentials struct {
-	repo     SettingRepository
+	repo      SettingRepository
 	encryptor SecretEncryptor
-	clientID string
-	client   *http.Client
+	clientID  string
+	client    *http.Client
 
 	mu          sync.Mutex
 	accessToken string

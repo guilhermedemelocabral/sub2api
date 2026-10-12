@@ -13,9 +13,9 @@ import (
 )
 
 type fakeDistillCredentialsSaver struct {
-	calls         int
-	refreshToken  string
-	clientSecret  string
+	calls        int
+	refreshToken string
+	clientSecret string
 }
 
 func (f *fakeDistillCredentialsSaver) Save(_ context.Context, refreshToken, clientSecret string) error {

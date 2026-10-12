@@ -1,9 +1,11 @@
 package distill
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -178,8 +180,14 @@ func TestReconcileRestartWithLedgerSkipsUpload(t *testing.T) {
 
 	var uploadCount atomic.Int32
 	srv := newDriveTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		uploadCount.Add(1)
-		t.Fatal("unexpected upload")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/drive/v3/files"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"files":[{"id":"existing-id","name":"` + name + `","size":"2"}]}`))
+		default:
+			uploadCount.Add(1)
+			t.Fatalf("unexpected upload %s %s", r.Method, r.URL.Path)
+		}
 	})
 	defer srv.Close()
 
@@ -216,7 +224,7 @@ func TestReconcileFindByNameBackfillsLedger(t *testing.T) {
 				t.Errorf("q = %q, want %q", q, wantQ)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"files":[{"id":"` + remoteID + `","name":"` + name + `"}]}`))
+			_, _ = w.Write([]byte(`{"files":[{"id":"` + remoteID + `","name":"` + name + `","size":"2"}]}`))
 		case r.Method == http.MethodPost, r.Method == http.MethodPut:
 			uploadBytes.Add(int32(len(mustReadAll(r.Body))))
 			t.Fatal("unexpected upload")
@@ -226,6 +234,11 @@ func TestReconcileFindByNameBackfillsLedger(t *testing.T) {
 	})
 	defer srv.Close()
 
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	d := newHTTPDriveForTest(srv)
 	now := func() time.Time { return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC) }
 	if err := Reconcile(context.Background(), dir, now, d); err != nil {
@@ -233,6 +246,9 @@ func TestReconcileFindByNameBackfillsLedger(t *testing.T) {
 	}
 	if uploadBytes.Load() != 0 {
 		t.Fatalf("upload body bytes = %d", uploadBytes.Load())
+	}
+	if strings.Contains(logs.String(), "distill.part_uploaded") {
+		t.Fatalf("logged upload without uploading: %s", logs.String())
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "uploaded.json"))
 	if err != nil {
@@ -314,8 +330,8 @@ func (f driveAPIFunc) Upload(ctx context.Context, name string, r io.ReadSeeker, 
 	return f(ctx, name, r, size)
 }
 
-func (driveAPIFunc) FindByName(context.Context, string) (string, bool, error) {
-	return "", false, nil
+func (driveAPIFunc) FindByName(context.Context, string) (string, int64, bool, error) {
+	return "", 0, false, nil
 }
 
 func mustReadAll(r io.Reader) []byte {
@@ -324,4 +340,134 @@ func mustReadAll(r io.Reader) []byte {
 		panic(err)
 	}
 	return b
+}
+
+func TestReconcileSizeMismatchUploadsNextFreePart(t *testing.T) {
+	dir := t.TempDir()
+	name := "2026-10-11-001.jsonl"
+	next := "2026-10-11-002.jsonl"
+	path := filepath.Join(dir, name)
+	content := []byte("local-file\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uploaded.json"), []byte(`{"`+name+`":"old-id"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var uploadedName string
+	var putBody []byte
+	srv := newDriveTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/drive/v3/files"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"files":[{"id":"old-id","name":"` + name + `","size":"1"}]}`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/upload/drive/v3/files"):
+			var meta struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&meta); err != nil {
+				t.Errorf("decode meta: %v", err)
+			}
+			uploadedName = meta.Name
+			w.Header().Set("Location", uploadSessionURL(r))
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut:
+			putBody = mustReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"new-id"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	defer srv.Close()
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if err := Reconcile(context.Background(), dir, func() time.Time {
+		return time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	}, newHTTPDriveForTest(srv)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if uploadedName != next {
+		t.Fatalf("uploaded name = %q, want %q", uploadedName, next)
+	}
+	if string(putBody) != string(content) {
+		t.Fatalf("put body = %q", putBody)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("colliding local part should be removed after reupload: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "uploaded.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ledger map[string]string
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		t.Fatal(err)
+	}
+	if ledger[name] != "old-id" {
+		t.Fatalf("ledger[%s] = %q", name, ledger[name])
+	}
+	if ledger[next] != "new-id" {
+		t.Fatalf("ledger[%s] = %q", next, ledger[next])
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "distill.part_uploaded") || !strings.Contains(logged, next) {
+		t.Fatalf("missing upload log for %s: %s", next, logged)
+	}
+	if strings.Contains(logged, `"part":"`+name+`"`) {
+		t.Fatalf("logged upload for a file that was not uploaded: %s", logged)
+	}
+}
+
+func TestLoadLedgerQuarantinesInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	const secret = "SECRET_LEDGER_BODY"
+	if err := os.WriteFile(filepath.Join(dir, "uploaded.json"), []byte("{"+secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	ledger, err := loadLedger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 0 {
+		t.Fatalf("ledger = %#v", ledger)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "uploaded.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid ledger should be moved aside: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "uploaded.json.invalid*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("quarantine files = %v", matches)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("log included ledger contents: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "distill.ledger_invalid") {
+		t.Fatalf("missing invalid-ledger log: %s", logs.String())
+	}
+
+	ledger, err = loadLedger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 0 {
+		t.Fatalf("second ledger = %#v", ledger)
+	}
+	if strings.Count(logs.String(), "distill.ledger_invalid") != 1 {
+		t.Fatalf("logged invalid ledger more than once: %s", logs.String())
+	}
 }

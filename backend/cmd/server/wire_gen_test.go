@@ -165,7 +165,8 @@ func TestProvideDistillCollectorLogsDriveDisabledOnSettingsError(t *testing.T) {
 	cfg.Distill.Drive.ClientID = "client-id"
 
 	repo := &distillSettingsRepoLoadErr{err: errors.New("settings read failed")}
-	collector := provideDistillCollector(cfg, repo, prefixEncryptor{}, nil, nil)
+	creds := service.NewDistillCredentials(repo, prefixEncryptor{}, cfg.Distill.Drive.ClientID)
+	collector := provideDistillCollector(cfg, creds, nil, nil)
 	require.NotNil(t, collector)
 	require.True(t, collector.Enabled())
 	require.Contains(t, buf.String(), "distill.drive_disabled")

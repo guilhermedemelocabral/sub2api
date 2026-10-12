@@ -14,18 +14,18 @@ const (
 )
 
 type Turn struct {
-	At                 time.Time                `json:"at"`
-	RequestID          string                   `json:"request_id"`
-	SessionID          string                   `json:"session_id"`
-	ResponseID         string                   `json:"response_id"`
-	PreviousResponseID string                   `json:"previous_response_id"`
-	APIKeyID           int64                    `json:"api_key_id"`
-	Protocol           string                   `json:"protocol"`
-	Model              string                   `json:"model"`
-	Stream             bool                     `json:"stream"`
-	Tools              []apicompat.ChatTool     `json:"tools"`
-	Messages           []apicompat.ChatMessage  `json:"messages"`
-	Assistant          apicompat.ChatMessage    `json:"assistant"`
+	At                 time.Time               `json:"at"`
+	RequestID          string                  `json:"request_id"`
+	SessionID          string                  `json:"session_id"`
+	ResponseID         string                  `json:"response_id"`
+	PreviousResponseID string                  `json:"previous_response_id"`
+	APIKeyID           int64                   `json:"api_key_id"`
+	Protocol           string                  `json:"protocol"`
+	Model              string                  `json:"model"`
+	Stream             bool                    `json:"stream"`
+	Tools              []apicompat.ChatTool    `json:"tools"`
+	Messages           []apicompat.ChatMessage `json:"messages"`
+	Assistant          apicompat.ChatMessage   `json:"assistant"`
 }
 
 func MarshalTurn(t Turn) ([]byte, error) {

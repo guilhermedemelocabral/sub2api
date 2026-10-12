@@ -122,6 +122,28 @@ func NewWriter(dir string, queueSize int, queueBytes, partBytes int64, now func(
 		}
 	}
 
+	today := utcDate(now())
+	ledger, err := loadLedger(dir)
+	if err != nil {
+		if w.partFile != nil {
+			_ = w.partFile.Close()
+		}
+		return nil, err
+	}
+	maxN, err := maxPartNumber(dir, today, ledger)
+	if err != nil {
+		if w.partFile != nil {
+			_ = w.partFile.Close()
+		}
+		return nil, err
+	}
+	if maxN > w.partSeq {
+		w.partSeq = maxN
+		if w.partDate == "" {
+			w.partDate = today
+		}
+	}
+
 	go w.run()
 	return w, nil
 }

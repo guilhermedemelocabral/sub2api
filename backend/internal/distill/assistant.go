@@ -11,8 +11,21 @@ import (
 
 type contextKey struct{}
 
-// ContextKey identifies the distill Tap stored on a gin context.
+// ContextKey is the request-context key for a Tap. Install paths do not use it;
+// they store the Tap on gin.Context under GinKey so copies of the request
+// context (usage-record workers) do not retain response bytes.
 var ContextKey = contextKey{}
+
+// GinKey is the gin.Context key for *Tap.
+const GinKey = "distill_tap"
+
+type bodyKind int
+
+const (
+	bodyUnknown bodyKind = iota
+	bodyJSON
+	bodySSE
+)
 
 // Tap accumulates upstream response bytes and assembles an assistant message.
 type Tap struct {
@@ -20,12 +33,16 @@ type Tap struct {
 	lineBuf  strings.Builder
 	rawBuf   bytes.Buffer
 
-	responseID string
-	content    strings.Builder
-	reasoning  strings.Builder
-	toolCalls  []apicompat.ChatToolCall
-	toolArgs   map[int]*strings.Builder
-	textBlocks map[int]struct{}
+	responseID   string
+	content      strings.Builder
+	reasoning    strings.Builder
+	toolCalls    []apicompat.ChatToolCall
+	toolArgs     map[int]*strings.Builder
+	toolBlockPos map[int]int
+	textBlocks   map[int]struct{}
+
+	body   bodyKind
+	sawSSE bool
 
 	chatJSONDone bool
 	chatMessage  apicompat.ChatMessage
@@ -37,9 +54,10 @@ type Tap struct {
 // NewTap returns a Tap for the given distill protocol constant.
 func NewTap(protocol string) *Tap {
 	t := &Tap{
-		protocol:   protocol,
-		toolArgs:   make(map[int]*strings.Builder),
-		textBlocks: make(map[int]struct{}),
+		protocol:     protocol,
+		toolArgs:     make(map[int]*strings.Builder),
+		toolBlockPos: make(map[int]int),
+		textBlocks:   make(map[int]struct{}),
 	}
 	if protocol == ProtocolResponses {
 		t.responsesAcc = apicompat.NewBufferedResponseAccumulator()
@@ -49,7 +67,7 @@ func NewTap(protocol string) *Tap {
 
 // Feed appends client response bytes and parses complete SSE/JSON fragments.
 func (t *Tap) Feed(b []byte) {
-	t.rawBuf.Write(b)
+	t.noteBody(b)
 	t.lineBuf.WriteString(string(b))
 	for {
 		s := t.lineBuf.String()
@@ -66,6 +84,28 @@ func (t *Tap) Feed(b []byte) {
 		}
 		t.processLine(line)
 	}
+}
+
+// noteBody keeps a full copy only for JSON bodies. SSE responses drop the
+// buffer after the first non-space byte, leaving just the line tail in lineBuf.
+func (t *Tap) noteBody(b []byte) {
+	if t.body == bodySSE {
+		return
+	}
+	t.rawBuf.Write(b)
+	if t.body == bodyJSON {
+		return
+	}
+	trimmed := bytes.TrimLeft(t.rawBuf.Bytes(), " \t\r\n")
+	if len(trimmed) == 0 {
+		return
+	}
+	if trimmed[0] == '{' {
+		t.body = bodyJSON
+		return
+	}
+	t.body = bodySSE
+	t.rawBuf = bytes.Buffer{}
 }
 
 // Finish flushes any partial line and returns the assembled assistant message.
@@ -117,6 +157,9 @@ func (t *Tap) Finish() (assistant apicompat.ChatMessage, responseID string, ok b
 	case ProtocolAnthropicMessages:
 		if t.sawError {
 			return apicompat.ChatMessage{}, "", false
+		}
+		if !t.sawSSE {
+			t.tryParseAnthropicMessageBody()
 		}
 	}
 
@@ -176,6 +219,10 @@ func (t *Tap) processLine(line string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
+	}
+
+	if strings.HasPrefix(line, "event:") || strings.HasPrefix(line, "data:") {
+		t.sawSSE = true
 	}
 
 	if strings.HasPrefix(line, "data:") {
@@ -252,6 +299,56 @@ func (t *Tap) tryParseResponsesJSONBody() {
 	t.responseID = resp.ID
 }
 
+func (t *Tap) tryParseAnthropicMessageBody() {
+	body := strings.TrimSpace(t.rawBuf.String())
+	if body == "" || body[0] != '{' {
+		return
+	}
+	var msg struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Content []struct {
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &msg); err != nil || msg.Type != "message" {
+		return
+	}
+	if msg.ID != "" {
+		t.responseID = msg.ID
+	}
+	var text strings.Builder
+	for _, block := range msg.Content {
+		switch block.Type {
+		case "text":
+			text.WriteString(block.Text)
+		case "thinking":
+			t.reasoning.WriteString(block.Thinking)
+		case "tool_use":
+			args := strings.TrimSpace(string(block.Input))
+			if args == "" || args == "null" {
+				args = "{}"
+			}
+			t.toolCalls = append(t.toolCalls, apicompat.ChatToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: apicompat.ChatFunctionCall{
+					Name:      block.Name,
+					Arguments: args,
+				},
+			})
+		}
+	}
+	if text.Len() > 0 {
+		t.content.WriteString(text.String())
+	}
+}
+
 func (t *Tap) tryParseChatJSON(payload string) {
 	var resp apicompat.ChatCompletionsResponse
 	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
@@ -278,8 +375,8 @@ func (t *Tap) parseAnthropicEvent(payload, typ string) {
 		}
 	case "content_block_start":
 		var evt struct {
-			Index         int `json:"index"`
-			ContentBlock  struct {
+			Index        int `json:"index"`
+			ContentBlock struct {
 				Type string `json:"type"`
 				ID   string `json:"id"`
 				Name string `json:"name"`
@@ -292,28 +389,27 @@ func (t *Tap) parseAnthropicEvent(payload, typ string) {
 		case "text":
 			t.textBlocks[evt.Index] = struct{}{}
 		case "tool_use":
-			for len(t.toolCalls) <= evt.Index {
-				t.toolCalls = append(t.toolCalls, apicompat.ChatToolCall{})
-			}
-			t.toolCalls[evt.Index] = apicompat.ChatToolCall{
+			pos := len(t.toolCalls)
+			t.toolCalls = append(t.toolCalls, apicompat.ChatToolCall{
 				ID:   evt.ContentBlock.ID,
 				Type: "function",
 				Function: apicompat.ChatFunctionCall{
 					Name: evt.ContentBlock.Name,
 				},
-			}
-			if _, ok := t.toolArgs[evt.Index]; !ok {
-				t.toolArgs[evt.Index] = &strings.Builder{}
+			})
+			t.toolBlockPos[evt.Index] = pos
+			if _, ok := t.toolArgs[pos]; !ok {
+				t.toolArgs[pos] = &strings.Builder{}
 			}
 		}
 	case "content_block_delta":
 		var evt struct {
 			Index int `json:"index"`
 			Delta struct {
-				Type         string `json:"type"`
-				Text         string `json:"text"`
-				PartialJSON  string `json:"partial_json"`
-				Thinking     string `json:"thinking"`
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				PartialJSON string `json:"partial_json"`
+				Thinking    string `json:"thinking"`
 			} `json:"delta"`
 		}
 		if json.Unmarshal([]byte(payload), &evt) != nil {
@@ -323,7 +419,11 @@ func (t *Tap) parseAnthropicEvent(payload, typ string) {
 		case "text_delta":
 			t.content.WriteString(evt.Delta.Text)
 		case "input_json_delta":
-			if b, ok := t.toolArgs[evt.Index]; ok {
+			pos, ok := t.toolBlockPos[evt.Index]
+			if !ok {
+				return
+			}
+			if b, ok := t.toolArgs[pos]; ok {
 				b.WriteString(evt.Delta.PartialJSON)
 			}
 		case "thinking_delta":

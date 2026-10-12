@@ -2,6 +2,7 @@ package distill
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -458,4 +459,46 @@ func TestWriterLateFailedInsertDoesNotDropTwice(t *testing.T) {
 	w.mu.Unlock()
 	require.False(t, exists)
 	require.NoError(t, w.Close())
+}
+
+func TestWriterSeedsPartNumberFromLedger(t *testing.T) {
+	dir := t.TempDir()
+	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
+	ledger := map[string]string{
+		"2006-01-02-003.jsonl": "id-3",
+		"2006-01-01-009.jsonl": "old",
+	}
+	raw, err := json.Marshal(ledger)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "uploaded.json"), raw, 0600))
+
+	w, err := NewWriter(dir, 8, 1<<20, 1<<20, func() time.Time { return day })
+	require.NoError(t, err)
+	w.Enqueue([]byte("{\"a\":1}\n"))
+	require.NoError(t, w.Close())
+
+	require.NoFileExists(t, filepath.Join(dir, "2006-01-02-001.jsonl"))
+	data, err := os.ReadFile(filepath.Join(dir, "2006-01-02-004.jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, "{\"a\":1}\n", string(data))
+}
+
+func TestWriterSeedsHigherLedgerSeqWithoutSkippingOpenPart(t *testing.T) {
+	dir := t.TempDir()
+	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
+	open := filepath.Join(dir, "2006-01-02-002.jsonl")
+	require.NoError(t, os.WriteFile(open, []byte("keep\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "uploaded.json"), []byte(`{"2006-01-02-005.jsonl":"id"}`), 0600))
+
+	w, err := NewWriter(dir, 8, 1<<20, 5, func() time.Time { return day })
+	require.NoError(t, err)
+	w.Enqueue([]byte("a\n"))
+	require.NoError(t, w.Close())
+
+	kept, err := os.ReadFile(open)
+	require.NoError(t, err)
+	require.Equal(t, "keep\n", string(kept))
+	data, err := os.ReadFile(filepath.Join(dir, "2006-01-02-006.jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, "a\n", string(data))
 }

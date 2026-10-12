@@ -31,8 +31,8 @@ func (f *failOnceDrive) Upload(ctx context.Context, name string, r io.ReadSeeker
 	return f.id, nil
 }
 
-func (f *failOnceDrive) FindByName(ctx context.Context, name string) (string, bool, error) {
-	return "", false, nil
+func (f *failOnceDrive) FindByName(ctx context.Context, name string) (string, int64, bool, error) {
+	return "", 0, false, nil
 }
 
 func TestCollectorUploadsClosedPartAfterRetry(t *testing.T) {
@@ -164,8 +164,8 @@ func (f *failNTimesDrive) Upload(ctx context.Context, name string, r io.ReadSeek
 	return f.id, nil
 }
 
-func (f *failNTimesDrive) FindByName(ctx context.Context, name string) (string, bool, error) {
-	return "", false, nil
+func (f *failNTimesDrive) FindByName(ctx context.Context, name string) (string, int64, bool, error) {
+	return "", 0, false, nil
 }
 
 func TestCollectorStartupReconcileRetriesUntilSuccess(t *testing.T) {
@@ -221,8 +221,8 @@ func (d *recordingFailOnceDrive) Upload(ctx context.Context, name string, r io.R
 	return d.id, nil
 }
 
-func (d *recordingFailOnceDrive) FindByName(context.Context, string) (string, bool, error) {
-	return "", false, nil
+func (d *recordingFailOnceDrive) FindByName(context.Context, string) (string, int64, bool, error) {
+	return "", 0, false, nil
 }
 
 func (d *recordingFailOnceDrive) uploaded() []string {

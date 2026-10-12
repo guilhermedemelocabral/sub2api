@@ -3,7 +3,6 @@ package distill
 import (
 	"context"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -291,60 +290,5 @@ func (c *Collector) uploadPartWithRetry(ctx context.Context, path string) error 
 }
 
 func uploadPartOnce(ctx context.Context, dir, path string, api DriveAPI) error {
-	name := filepath.Base(path)
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	ledger, err := loadLedger(dir)
-	if err != nil {
-		return err
-	}
-	if id, ok := ledger[name]; ok && id != "" {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-
-	if id, ok, err := api.FindByName(ctx, name); err != nil {
-		return err
-	} else if ok {
-		ledger[name] = id
-		if err := saveLedger(dir, ledger); err != nil {
-			return err
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		slog.Info("distill.part_uploaded", "part", name)
-		return nil
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return err
-	}
-	id, err := api.Upload(ctx, name, f, st.Size())
-	f.Close()
-	if err != nil {
-		return err
-	}
-	ledger[name] = id
-	if err := saveLedger(dir, ledger); err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	slog.Info("distill.part_uploaded", "part", name)
-	return nil
+	return uploadOrAdoptPart(ctx, dir, path, api)
 }

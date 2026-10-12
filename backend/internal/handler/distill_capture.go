@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/distill"
@@ -15,7 +14,7 @@ func installDistillTap(c *gin.Context, collector *distill.Collector, protocol st
 	}
 	tap := distill.NewTap(protocol)
 	c.Writer = tap.Wrap(c.Writer)
-	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), distill.ContextKey, tap))
+	c.Set(distill.GinKey, tap)
 }
 
 func captureDistill(c *gin.Context, collector *distill.Collector, protocol string, clientDisconnect bool, requestID, model string, stream bool, apiKeyID int64, body []byte) {
@@ -50,9 +49,10 @@ func captureDistill(c *gin.Context, collector *distill.Collector, protocol strin
 }
 
 func distillTapFrom(c *gin.Context) *distill.Tap {
-	if c == nil || c.Request == nil {
+	if c == nil {
 		return nil
 	}
-	tap, _ := c.Request.Context().Value(distill.ContextKey).(*distill.Tap)
-	return tap
+	tap, _ := c.Get(distill.GinKey)
+	typed, _ := tap.(*distill.Tap)
+	return typed
 }

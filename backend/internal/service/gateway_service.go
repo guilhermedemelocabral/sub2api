@@ -800,7 +800,7 @@ type GatewayService struct {
 	tlsFPProfileService   *TLSFingerprintProfileService
 	balanceNotifyService  *BalanceNotifyService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
-	distill                 *distill.Collector
+	distill               *distill.Collector
 }
 
 func (s *GatewayService) SetDistill(c *distill.Collector) {
