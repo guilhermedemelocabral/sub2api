@@ -61,6 +61,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		// Cleanup function provider
 		provideCleanup,
 
+		provideDistillCredentials,
 		provideDistillCollector,
 
 		// Application struct
@@ -87,14 +88,20 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 	}
 }
 
-func provideDistillCollector(
+func provideDistillCredentials(
 	cfg *config.Config,
 	settingRepo service.SettingRepository,
 	encryptor service.SecretEncryptor,
+) *service.DistillCredentials {
+	return service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
+}
+
+func provideDistillCollector(
+	cfg *config.Config,
+	creds *service.DistillCredentials,
 	gateway *service.GatewayService,
 	openAIGateway *service.OpenAIGatewayService,
 ) *distill.Collector {
-	creds := service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
 	refresh, secret, err := creds.Load(context.Background())
 	if err != nil {
 		slog.Error("distill.drive_disabled", "err", err)

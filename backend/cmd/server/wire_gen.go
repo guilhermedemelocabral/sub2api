@@ -242,7 +242,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	registry := payment.ProvideRegistry()
 	defaultLoadBalancer := payment.ProvideDefaultLoadBalancer(client, encryptionKey)
 	paymentService := service.ProvidePaymentService(client, registry, defaultLoadBalancer, redeemService, subscriptionService, paymentConfigService, userRepository, groupRepository, affiliateService, notificationEmailService)
-	settingHandler := handler.ProvideAdminSettingHandler(settingService, emailService, turnstileService, aliyunCaptchaService, opsService, paymentConfigService, paymentService, userAttributeService, notificationEmailService, totpService, userService)
+	distillCredentials := provideDistillCredentials(configConfig, settingRepository, secretEncryptor)
+	settingHandler := handler.ProvideAdminSettingHandler(settingService, emailService, turnstileService, aliyunCaptchaService, opsService, paymentConfigService, paymentService, userAttributeService, notificationEmailService, totpService, userService, distillCredentials)
 	opsHandler := admin.NewOpsHandler(opsService)
 	updateCache := repository.NewUpdateCache(redisClient)
 	gitHubReleaseClient := repository.ProvideGitHubReleaseClient(configConfig)
@@ -337,7 +338,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	stepUpAuthMiddleware := middleware.NewStepUpAuthMiddleware(totpService, userService, settingService)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
-	collector := provideDistillCollector(configConfig, settingRepository, secretEncryptor, gatewayService, openAIGatewayService)
+	collector := provideDistillCollector(configConfig, distillCredentials, gatewayService, openAIGatewayService)
 	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
@@ -396,14 +397,20 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 	}
 }
 
-func provideDistillCollector(
+func provideDistillCredentials(
 	cfg *config.Config,
 	settingRepo service.SettingRepository,
 	encryptor service.SecretEncryptor,
+) *service.DistillCredentials {
+	return service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
+}
+
+func provideDistillCollector(
+	cfg *config.Config,
+	creds *service.DistillCredentials,
 	gateway *service.GatewayService,
 	openAIGateway *service.OpenAIGatewayService,
 ) *distill.Collector {
-	creds := service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
 	refresh, secret, err := creds.Load(context.Background())
 	if err != nil {
 		slog.Error("distill.drive_disabled", "err", err)
