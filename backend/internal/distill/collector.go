@@ -38,10 +38,13 @@ type Collector struct {
 	closedUpload chan string
 	backoff      func(attempt int) time.Duration
 
+	reconcileSynced atomic.Bool
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	uploadWg sync.WaitGroup
 	watchWg  sync.WaitGroup
+	reconcileWg sync.WaitGroup
 }
 
 func NewCollector(cfg CollectorConfig) *Collector {
@@ -69,14 +72,17 @@ func NewCollector(cfg CollectorConfig) *Collector {
 		slog.Error("distill.capture_disabled", "err", err)
 		return c
 	}
+	w.SetDropObserver(func(reason string, total int64) {
+		slog.Warn("distill.turn_dropped", "reason", reason, "dropped", total)
+	})
 	c.writer = w
 	c.enabled.Store(true)
 
 	if cfg.DriveEnabled && cfg.Drive != nil {
 		openName := inferOpenPartName(cfg.Dir, w.ClosedParts(), cfg.Now)
-		if err := Reconcile(context.Background(), cfg.Dir, openName, cfg.Drive); err != nil {
-			slog.Error("distill.upload_failed", "part", "reconcile", "err", err)
-		}
+		c.startStartupReconcile(openName)
+	} else {
+		c.reconcileSynced.Store(true)
 	}
 
 	c.watchWg.Add(1)
@@ -124,17 +130,7 @@ func (c *Collector) Enqueue(line []byte) {
 	if c == nil || !c.enabled.Load() || c.writer == nil {
 		return
 	}
-	beforeDrop := c.writer.Dropped()
-	beforeWrite := c.writer.Written()
 	c.writer.Enqueue(line)
-	afterDrop := c.writer.Dropped()
-	if afterDrop > beforeDrop {
-		slog.Warn("distill.turn_dropped", "reason", "writer", "dropped", afterDrop)
-	}
-	_ = beforeWrite
-	if c.writer.Written() > beforeWrite {
-		// written counter incremented; body is not logged
-	}
 }
 
 func (c *Collector) Close() error {
@@ -144,6 +140,7 @@ func (c *Collector) Close() error {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
 	})
+	c.reconcileWg.Wait()
 	if c.writer != nil {
 		if err := c.writer.Close(); err != nil {
 			return err
@@ -154,12 +151,48 @@ func (c *Collector) Close() error {
 	return nil
 }
 
+func (c *Collector) startStartupReconcile(openName string) {
+	c.reconcileWg.Add(1)
+	go func() {
+		defer c.reconcileWg.Done()
+		attempt := 0
+		for {
+			select {
+			case <-c.stopCh:
+				return
+			default:
+			}
+			err := Reconcile(context.Background(), c.dir, openName, c.drive)
+			if err == nil {
+				c.reconcileSynced.Store(true)
+				return
+			}
+			part := ReconcileFailedPart(err)
+			if part == "" {
+				part = "reconcile"
+			}
+			slog.Error("distill.upload_failed", "part", part, "err", err)
+			delay := c.backoff(attempt)
+			attempt++
+			timer := time.NewTimer(delay)
+			select {
+			case <-c.stopCh:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
 func (c *Collector) watchClosedParts(now func() time.Time) {
 	defer c.watchWg.Done()
 	seen := make(map[string]struct{})
-	if c.writer != nil {
+	var startupPending map[string]struct{}
+	if c.driveEnabled && c.drive != nil && c.writer != nil {
+		startupPending = make(map[string]struct{})
 		for _, p := range c.writer.ClosedParts() {
-			seen[p] = struct{}{}
+			startupPending[p] = struct{}{}
 		}
 	}
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -175,6 +208,11 @@ func (c *Collector) watchClosedParts(now func() time.Time) {
 			for _, p := range c.writer.ClosedParts() {
 				if _, ok := seen[p]; ok {
 					continue
+				}
+				if startupPending != nil {
+					if _, pending := startupPending[p]; pending && !c.reconcileSynced.Load() {
+						continue
+					}
 				}
 				seen[p] = struct{}{}
 				select {

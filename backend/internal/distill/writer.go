@@ -36,6 +36,8 @@ type Writer struct {
 	dropped atomic.Int64
 	written atomic.Int64
 
+	dropObserver atomic.Pointer[func(reason string, total int64)]
+
 	partFile *os.File
 	partPath string
 	partSize int64
@@ -198,13 +200,28 @@ func scanParts(dir string, now func() time.Time) (closed []string, openPath stri
 	return closed, "", 0, nil
 }
 
+func (w *Writer) SetDropObserver(fn func(reason string, total int64)) {
+	if fn == nil {
+		w.dropObserver.Store(nil)
+		return
+	}
+	w.dropObserver.Store(&fn)
+}
+
+func (w *Writer) incrementDropped(reason string) {
+	total := w.dropped.Add(1)
+	if p := w.dropObserver.Load(); p != nil && *p != nil {
+		(*p)(reason, total)
+	}
+}
+
 func (w *Writer) Enqueue(line []byte) {
 	lineCopy := append([]byte(nil), line...)
 
 	w.mu.Lock()
 	if w.rejectEnqueue {
 		w.mu.Unlock()
-		w.dropped.Add(1)
+		w.incrementDropped("queue_closed")
 		return
 	}
 	seq := w.seq.Add(1)
@@ -284,7 +301,7 @@ func (w *Writer) insertFailed(seq uint64) {
 	}
 	w.pending[seq] = &queueItem{failed: true}
 	w.mu.Unlock()
-	w.dropped.Add(1)
+	w.incrementDropped("spool")
 	w.poke()
 }
 
@@ -387,13 +404,13 @@ func (w *Writer) commitItem(item *queueItem) {
 		data, err := os.ReadFile(item.spoolPath)
 		_ = os.Remove(item.spoolPath)
 		if err != nil {
-			w.dropped.Add(1)
+			w.incrementDropped("spool_read")
 			return
 		}
 		line = data
 	}
 	if err := w.appendLine(line); err != nil {
-		w.dropped.Add(1)
+		w.incrementDropped("append")
 		return
 	}
 	w.written.Add(1)
@@ -416,7 +433,7 @@ func (w *Writer) abandonThrough(max uint64) {
 		w.nextWrite++
 		w.mu.Unlock()
 		if !ok {
-			w.dropped.Add(1)
+			w.incrementDropped("drain")
 			continue
 		}
 		w.discard(item)
@@ -425,14 +442,14 @@ func (w *Writer) abandonThrough(max uint64) {
 
 func (w *Writer) discard(item *queueItem) {
 	if item == nil {
-		w.dropped.Add(1)
+		w.incrementDropped("drain")
 		return
 	}
 	if item.spoolPath != "" {
 		_ = os.Remove(item.spoolPath)
 	}
 	if !item.failed {
-		w.dropped.Add(1)
+		w.incrementDropped("drain")
 	}
 }
 

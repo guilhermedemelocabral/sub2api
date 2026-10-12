@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -100,9 +104,70 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // openAIAutoReset
 		nil, // promptAudit
 		nil, // pluginManager
+		nil, // distillCollector
 	)
 
 	require.NotPanics(t, func() {
 		cleanup()
 	})
+}
+
+type distillSettingsRepoLoadErr struct {
+	err error
+}
+
+func (r *distillSettingsRepoLoadErr) Get(ctx context.Context, key string) (*service.Setting, error) {
+	return nil, r.err
+}
+
+func (r *distillSettingsRepoLoadErr) GetValue(ctx context.Context, key string) (string, error) {
+	return "", r.err
+}
+
+func (r *distillSettingsRepoLoadErr) Set(ctx context.Context, key, value string) error {
+	return r.err
+}
+
+func (r *distillSettingsRepoLoadErr) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	return nil, r.err
+}
+
+func (r *distillSettingsRepoLoadErr) SetMultiple(ctx context.Context, settings map[string]string) error {
+	return r.err
+}
+
+func (r *distillSettingsRepoLoadErr) GetAll(ctx context.Context) (map[string]string, error) {
+	return nil, r.err
+}
+
+func (r *distillSettingsRepoLoadErr) Delete(ctx context.Context, key string) error {
+	return r.err
+}
+
+type prefixEncryptor struct{}
+
+func (prefixEncryptor) Encrypt(plaintext string) (string, error) { return plaintext, nil }
+func (prefixEncryptor) Decrypt(ciphertext string) (string, error) {
+	return ciphertext, nil
+}
+
+func TestProvideDistillCollectorLogsDriveDisabledOnSettingsError(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg := &config.Config{}
+	cfg.Distill.Enabled = true
+	cfg.Distill.Dir = t.TempDir()
+	cfg.Distill.Drive.Enabled = true
+	cfg.Distill.Drive.FolderID = "folder"
+	cfg.Distill.Drive.ClientID = "client-id"
+
+	repo := &distillSettingsRepoLoadErr{err: errors.New("settings read failed")}
+	collector := provideDistillCollector(cfg, repo, prefixEncryptor{}, nil, nil)
+	require.NotNil(t, collector)
+	require.True(t, collector.Enabled())
+	require.Contains(t, buf.String(), "distill.drive_disabled")
+	require.NotContains(t, buf.String(), "distill.capture_disabled")
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,32 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+var defaultDriveHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+
+// DefaultDriveHTTPClient is the timeout-bound client used when HTTPDrive.Client is nil.
+func DefaultDriveHTTPClient() *http.Client {
+	return defaultDriveHTTPClient
+}
+
+type reconcilePartError struct {
+	part string
+	err  error
+}
+
+func (e *reconcilePartError) Error() string { return e.err.Error() }
+func (e *reconcilePartError) Unwrap() error { return e.err }
+
+// ReconcileFailedPart returns the closed part base name from a Reconcile error, if any.
+func ReconcileFailedPart(err error) string {
+	var pe *reconcilePartError
+	if errors.As(err, &pe) {
+		return pe.part
+	}
+	return ""
+}
 
 type DriveAPI interface {
 	Upload(ctx context.Context, name string, r io.ReadSeeker, size int64) (fileID string, err error)
@@ -31,7 +57,7 @@ func (d *HTTPDrive) client() *http.Client {
 	if d.Client != nil {
 		return d.Client
 	}
-	return http.DefaultClient
+	return defaultDriveHTTPClient
 }
 
 func (d *HTTPDrive) uploadBase() string {
@@ -288,7 +314,7 @@ func Reconcile(ctx context.Context, dir, openName string, api DriveAPI) error {
 		}
 
 		if id, ok, err := api.FindByName(ctx, name); err != nil {
-			return err
+			return &reconcilePartError{part: name, err: err}
 		} else if ok {
 			ledger[name] = id
 			if err := saveLedger(dir, ledger); err != nil {
@@ -302,17 +328,17 @@ func Reconcile(ctx context.Context, dir, openName string, api DriveAPI) error {
 
 		f, err := os.Open(path)
 		if err != nil {
-			return err
+			return &reconcilePartError{part: name, err: err}
 		}
 		st, err := f.Stat()
 		if err != nil {
 			f.Close()
-			return err
+			return &reconcilePartError{part: name, err: err}
 		}
 		id, err := api.Upload(ctx, name, f, st.Size())
 		f.Close()
 		if err != nil {
-			return err
+			return &reconcilePartError{part: name, err: err}
 		}
 		ledger[name] = id
 		if err := saveLedger(dir, ledger); err != nil {

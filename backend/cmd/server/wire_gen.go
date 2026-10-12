@@ -406,7 +406,7 @@ func provideDistillCollector(
 	creds := service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
 	refresh, secret, err := creds.Load(context.Background())
 	if err != nil {
-		slog.Error("distill.capture_disabled", "err", err)
+		slog.Error("distill.drive_disabled", "err", err)
 		refresh = ""
 		secret = ""
 	}

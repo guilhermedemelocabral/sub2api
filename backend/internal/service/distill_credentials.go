@@ -35,7 +35,7 @@ func NewDistillCredentials(repo SettingRepository, encryptor SecretEncryptor, cl
 		repo:      repo,
 		encryptor: encryptor,
 		clientID:  strings.TrimSpace(clientID),
-		client:    http.DefaultClient,
+		client:    &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
