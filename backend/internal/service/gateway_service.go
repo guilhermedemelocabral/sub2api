@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -799,6 +800,21 @@ type GatewayService struct {
 	tlsFPProfileService   *TLSFingerprintProfileService
 	balanceNotifyService  *BalanceNotifyService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	distill                 *distill.Collector
+}
+
+func (s *GatewayService) SetDistill(c *distill.Collector) {
+	if s == nil {
+		return
+	}
+	s.distill = c
+}
+
+func (s *GatewayService) Distill() *distill.Collector {
+	if s == nil {
+		return nil
+	}
+	return s.distill
 }
 
 // NewGatewayService creates a new GatewayService

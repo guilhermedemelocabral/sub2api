@@ -10,6 +10,7 @@ import (
 	"context"
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
@@ -20,7 +21,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/redis/go-redis/v9"
 	"log"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -334,6 +337,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	stepUpAuthMiddleware := middleware.NewStepUpAuthMiddleware(totpService, userService, settingService)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
+	collector := provideDistillCollector(configConfig, settingRepository, secretEncryptor, gatewayService, openAIGatewayService)
 	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
@@ -353,11 +357,12 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager)
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager, collector)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
 		PluginManager: pluginManager,
+		Distill:       collector,
 		Cleanup:       v,
 	}
 	return application, nil
@@ -369,6 +374,7 @@ type Application struct {
 	Server        *http.Server
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
+	Distill       *distill.Collector
 	Cleanup       func()
 }
 
@@ -388,6 +394,49 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 		Version:   buildInfo.Version,
 		BuildType: buildInfo.BuildType,
 	}
+}
+
+func provideDistillCollector(
+	cfg *config.Config,
+	settingRepo service.SettingRepository,
+	encryptor service.SecretEncryptor,
+	gateway *service.GatewayService,
+	openAIGateway *service.OpenAIGatewayService,
+) *distill.Collector {
+	creds := service.NewDistillCredentials(settingRepo, encryptor, cfg.Distill.Drive.ClientID)
+	refresh, secret, err := creds.Load(context.Background())
+	if err != nil {
+		slog.Error("distill.capture_disabled", "err", err)
+		refresh = ""
+		secret = ""
+	}
+	driveEnabled := cfg.Distill.Drive.Enabled && strings.TrimSpace(cfg.Distill.Drive.FolderID) != "" && strings.TrimSpace(cfg.Distill.Drive.ClientID) != "" && strings.TrimSpace(refresh) != "" && strings.TrimSpace(secret) != ""
+
+	var drive distill.DriveAPI
+	if driveEnabled {
+		drive = &distill.HTTPDrive{
+			FolderID: cfg.Distill.Drive.FolderID,
+			Token:    creds.AccessToken,
+		}
+	}
+
+	collector := distill.NewCollector(distill.CollectorConfig{
+		Enabled:      cfg.Distill.Enabled,
+		Dir:          cfg.Distill.Dir,
+		QueueSize:    cfg.Distill.QueueSize,
+		QueueBytes:   cfg.Distill.QueueBytes,
+		PartBytes:    cfg.Distill.PartBytes,
+		DriveEnabled: driveEnabled,
+		Drive:        drive,
+		AutoUpload:   true,
+	})
+	if gateway != nil {
+		gateway.SetDistill(collector)
+	}
+	if openAIGateway != nil {
+		openAIGateway.SetDistill(collector)
+	}
+	return collector
 }
 
 func provideCleanup(
@@ -439,6 +488,7 @@ func provideCleanup(
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	distillCollector *distill.Collector,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -450,6 +500,12 @@ func provideCleanup(
 		}
 
 		parallelSteps := []cleanupStep{
+			{"DistillCollector", func() error {
+				if distillCollector != nil {
+					return distillCollector.Close()
+				}
+				return nil
+			}},
 			{"PluginManager", func() error {
 				if pluginManager != nil {
 					pluginManager.Stop()

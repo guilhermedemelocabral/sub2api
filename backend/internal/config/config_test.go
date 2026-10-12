@@ -30,6 +30,20 @@ func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
 	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
 }
 
+func TestDistillDefaults(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.Distill.Enabled)
+	require.Equal(t, "data/distill", cfg.Distill.Dir)
+	require.Equal(t, 256, cfg.Distill.QueueSize)
+	require.Equal(t, int64(67108864), cfg.Distill.QueueBytes)
+	require.Equal(t, int64(1073741824), cfg.Distill.PartBytes)
+	require.False(t, cfg.Distill.Drive.Enabled)
+	require.Empty(t, cfg.Distill.Drive.FolderID)
+	require.Empty(t, cfg.Distill.Drive.ClientID)
+}
+
 func TestLoadTimezonePrecedence(t *testing.T) {
 	tests := []struct {
 		name         string

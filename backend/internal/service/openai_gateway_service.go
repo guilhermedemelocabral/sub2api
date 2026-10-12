@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/distill"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -508,6 +509,21 @@ type OpenAIGatewayService struct {
 	// 剥离跨账号回带（openai_codex_turn_state.go）。
 	openaiCodexTurnStateOrigins sync.Map
 	openaiCodexTurnStateWrites  atomic.Uint64
+	distill                       *distill.Collector
+}
+
+func (s *OpenAIGatewayService) SetDistill(c *distill.Collector) {
+	if s == nil {
+		return
+	}
+	s.distill = c
+}
+
+func (s *OpenAIGatewayService) Distill() *distill.Collector {
+	if s == nil {
+		return nil
+	}
+	return s.distill
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
