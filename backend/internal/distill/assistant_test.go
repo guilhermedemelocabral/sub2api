@@ -93,6 +93,21 @@ func TestTapResponsesSSE(t *testing.T) {
 	require.Equal(t, `{}`, msg.ToolCalls[0].Function.Arguments)
 }
 
+func TestTapResponsesJSON(t *testing.T) {
+	tap := NewTap(ProtocolResponses)
+	body := `{"id":"resp_json","object":"response","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"bash","arguments":"{}"}]}`
+	tap.Feed([]byte(body))
+
+	msg, id, ok := tap.Finish()
+	require.True(t, ok)
+	require.Equal(t, "resp_json", id)
+	require.Equal(t, "assistant", msg.Role)
+	require.Len(t, msg.ToolCalls, 1)
+	require.Equal(t, "call_1", msg.ToolCalls[0].ID)
+	require.Equal(t, "bash", msg.ToolCalls[0].Function.Name)
+	require.Equal(t, `{}`, msg.ToolCalls[0].Function.Arguments)
+}
+
 func TestTapErrorJSONOkFalse(t *testing.T) {
 	tap := NewTap(ProtocolAnthropicMessages)
 	tap.Feed([]byte(`{"type":"error"}`))

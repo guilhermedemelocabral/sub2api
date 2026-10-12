@@ -84,6 +84,14 @@ func (t *Tap) Finish() (assistant apicompat.ChatMessage, responseID string, ok b
 			return msg, t.responseID, t.finishOK(msg)
 		}
 	case ProtocolResponses:
+		if !t.chatJSONDone {
+			t.tryParseResponsesJSONBody()
+		}
+		if t.chatJSONDone {
+			msg := t.chatMessage
+			msg.Role = "assistant"
+			return msg, t.responseID, t.finishOK(msg)
+		}
 		if t.responsesAcc != nil && (t.responsesAcc.HasContent() || t.responseID != "") {
 			resp := &apicompat.ResponsesResponse{
 				ID:     t.responseID,
@@ -222,6 +230,24 @@ func (t *Tap) tryParseChatJSONBody() {
 		return
 	}
 	t.tryParseChatJSON(body)
+}
+
+func (t *Tap) tryParseResponsesJSONBody() {
+	body := strings.TrimSpace(t.rawBuf.String())
+	if body == "" || body[0] != '{' {
+		return
+	}
+	var resp apicompat.ResponsesResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil || (resp.ID == "" && len(resp.Output) == 0) {
+		return
+	}
+	conv := apicompat.ResponsesToChatCompletions(&resp, resp.Model)
+	if len(conv.Choices) == 0 {
+		return
+	}
+	t.chatJSONDone = true
+	t.chatMessage = conv.Choices[0].Message
+	t.responseID = resp.ID
 }
 
 func (t *Tap) tryParseChatJSON(payload string) {
