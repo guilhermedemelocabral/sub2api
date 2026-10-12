@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,31 +35,38 @@ type Collector struct {
 	drive        DriveAPI
 	closedUpload chan string
 	backoff      func(attempt int) time.Duration
+	now          func() time.Time
+	uploadCtx    context.Context
+	cancelUpload context.CancelFunc
 
 	reconcileSynced atomic.Bool
 
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	uploadWg sync.WaitGroup
-	watchWg  sync.WaitGroup
+	stopOnce    sync.Once
+	stopCh      chan struct{}
+	uploadWg    sync.WaitGroup
+	watchWg     sync.WaitGroup
 	reconcileWg sync.WaitGroup
 }
 
 func NewCollector(cfg CollectorConfig) *Collector {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	uploadCtx, cancelUpload := context.WithCancel(context.Background())
 	c := &Collector{
 		dir:          cfg.Dir,
 		driveEnabled: cfg.DriveEnabled,
 		drive:        cfg.Drive,
 		closedUpload: make(chan string, 32),
 		stopCh:       make(chan struct{}),
+		now:          cfg.Now,
+		uploadCtx:    uploadCtx,
+		cancelUpload: cancelUpload,
 	}
 	if cfg.Backoff == nil {
 		c.backoff = defaultUploadBackoff
 	} else {
 		c.backoff = cfg.Backoff
-	}
-	if cfg.Now == nil {
-		cfg.Now = time.Now
 	}
 	if !cfg.Enabled {
 		return c
@@ -79,8 +84,7 @@ func NewCollector(cfg CollectorConfig) *Collector {
 	c.enabled.Store(true)
 
 	if cfg.DriveEnabled && cfg.Drive != nil {
-		openName := inferOpenPartName(cfg.Dir, w.ClosedParts(), cfg.Now)
-		c.startStartupReconcile(openName)
+		c.startStartupReconcile()
 	} else {
 		c.reconcileSynced.Store(true)
 	}
@@ -139,6 +143,11 @@ func (c *Collector) Close() error {
 	}
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
+		// Unblock an in-flight Drive call. The 5 minute client timeout remains
+		// the backstop only for attempts that are not shutting down.
+		if c.cancelUpload != nil {
+			c.cancelUpload()
+		}
 	})
 	c.reconcileWg.Wait()
 	if c.writer != nil {
@@ -151,7 +160,7 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) startStartupReconcile(openName string) {
+func (c *Collector) startStartupReconcile() {
 	c.reconcileWg.Add(1)
 	go func() {
 		defer c.reconcileWg.Done()
@@ -162,10 +171,16 @@ func (c *Collector) startStartupReconcile(openName string) {
 				return
 			default:
 			}
-			err := Reconcile(context.Background(), c.dir, openName, c.drive)
+			openName := openPartBaseName(c.dir, c.now)
+			err := Reconcile(c.uploadCtx, c.dir, openName, c.drive)
 			if err == nil {
 				c.reconcileSynced.Store(true)
 				return
+			}
+			select {
+			case <-c.stopCh:
+				return
+			default:
 			}
 			part := ReconcileFailedPart(err)
 			if part == "" {
@@ -233,7 +248,7 @@ func (c *Collector) runUploader() {
 		case <-c.stopCh:
 			return
 		case path := <-c.closedUpload:
-			_ = c.uploadPartWithRetry(context.Background(), path)
+			_ = c.uploadPartWithRetry(c.uploadCtx, path)
 		}
 	}
 }
@@ -330,46 +345,14 @@ func uploadPartOnce(ctx context.Context, dir, path string, api DriveAPI) error {
 	return nil
 }
 
-func inferOpenPartName(dir string, closedParts []string, now func() time.Time) string {
-	closedBase := make(map[string]struct{}, len(closedParts))
-	for _, p := range closedParts {
-		closedBase[filepath.Base(p)] = struct{}{}
+// openPartBaseName is the writer's open part: the highest NNN for today's UTC date.
+func openPartBaseName(dir string, now func() time.Time) string {
+	if now == nil {
+		now = time.Now
 	}
-	today := utcDate(now())
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	_, openPath, _, err := scanParts(dir, now)
+	if err != nil || openPath == "" {
 		return ""
 	}
-	bestName := ""
-	bestNum := -1
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		if _, closed := closedBase[name]; closed {
-			continue
-		}
-		base := strings.TrimSuffix(name, ".jsonl")
-		idx := strings.LastIndex(base, "-")
-		if idx < 0 {
-			continue
-		}
-		date := base[:idx]
-		if date != today {
-			continue
-		}
-		num, err := strconv.Atoi(base[idx+1:])
-		if err != nil || num < 1 {
-			continue
-		}
-		if num > bestNum {
-			bestNum = num
-			bestName = name
-		}
-	}
-	return bestName
+	return filepath.Base(openPath)
 }

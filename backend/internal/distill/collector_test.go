@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,13 +204,115 @@ func TestCollectorStartupReconcileRetriesUntilSuccess(t *testing.T) {
 	require.Equal(t, "remote-id", ledger[closedName])
 }
 
+type recordingFailOnceDrive struct {
+	id    string
+	calls atomic.Int32
+	mu    sync.Mutex
+	names []string
+}
+
+func (d *recordingFailOnceDrive) Upload(ctx context.Context, name string, r io.ReadSeeker, size int64) (string, error) {
+	d.mu.Lock()
+	d.names = append(d.names, name)
+	d.mu.Unlock()
+	if d.calls.Add(1) == 1 {
+		return "", errors.New("transient upload failure")
+	}
+	return d.id, nil
+}
+
+func (d *recordingFailOnceDrive) FindByName(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (d *recordingFailOnceDrive) uploaded() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.names))
+	copy(out, d.names)
+	return out
+}
+
+func TestCollectorReconcileRetrySkipsPartOpenedDuringBackoff(t *testing.T) {
+	dir := t.TempDir()
+	closedName := "2006-01-01-001.jsonl"
+	closedPath := filepath.Join(dir, closedName)
+	require.NoError(t, os.WriteFile(closedPath, []byte("closed-yesterday\n"), 0o600))
+
+	openName := "2006-01-02-001.jsonl"
+	openPath := filepath.Join(dir, openName)
+	today := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	drive := &recordingFailOnceDrive{id: "remote-id"}
+	c := NewCollector(CollectorConfig{
+		Enabled:      true,
+		Dir:          dir,
+		QueueSize:    8,
+		QueueBytes:   1 << 20,
+		PartBytes:    1 << 20,
+		DriveEnabled: true,
+		Drive:        drive,
+		Now:          func() time.Time { return today },
+		Backoff: func(attempt int) time.Duration {
+			if attempt == 0 {
+				if err := os.WriteFile(openPath, []byte("open-today\n"), 0o600); err != nil {
+					t.Errorf("write open part: %v", err)
+				}
+			}
+			return 0
+		},
+		AutoUpload: false,
+	})
+	require.True(t, c.Enabled())
+	t.Cleanup(func() { _ = c.Close() })
+
+	require.Eventually(t, func() bool {
+		if _, err := os.Stat(closedPath); !os.IsNotExist(err) {
+			return false
+		}
+		return strings.Contains(buf.String(), "distill.part_uploaded")
+	}, 5*time.Second, 5*time.Millisecond)
+
+	body, err := os.ReadFile(openPath)
+	require.NoError(t, err)
+	require.Equal(t, "open-today\n", string(body))
+
+	ledger, err := loadLedger(dir)
+	require.NoError(t, err)
+	require.Equal(t, "remote-id", ledger[closedName])
+	_, openInLedger := ledger[openName]
+	require.False(t, openInLedger)
+
+	require.Equal(t, []string{closedName, closedName}, drive.uploaded())
+
+	logs := buf.String()
+	require.Contains(t, logs, "distill.part_uploaded")
+	require.Contains(t, logs, closedName)
+	require.NotContains(t, logs, openName)
+	require.NotContains(t, logs, "open-today")
+	require.NotContains(t, logs, "closed-yesterday")
+}
+
 func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 	dir := t.TempDir()
 	closedPath := filepath.Join(dir, "2006-01-01-001.jsonl")
 	require.NoError(t, os.WriteFile(closedPath, []byte("x\n"), 0o600))
 
+	require.Equal(t, 5*time.Minute, DefaultDriveHTTPClient().Timeout)
+
+	entered := make(chan struct{})
+	var once sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(500 * time.Millisecond)
+		once.Do(func() { close(entered) })
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Minute):
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -219,7 +322,7 @@ func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 		Token:      testToken,
 		UploadBase: srv.URL,
 		DriveBase:  srv.URL,
-		Client:     &http.Client{Timeout: 50 * time.Millisecond},
+		Client:     &http.Client{Timeout: 5 * time.Minute},
 	}
 
 	day := time.Date(2006, 1, 2, 12, 0, 0, 0, time.UTC)
@@ -236,6 +339,12 @@ func TestCollectorCloseDoesNotHangOnSlowDriveHTTP(t *testing.T) {
 		AutoUpload:   true,
 	})
 	require.True(t, c.Enabled())
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Drive request did not start")
+	}
 
 	done := make(chan struct{})
 	go func() {

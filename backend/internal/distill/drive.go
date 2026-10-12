@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,9 +47,9 @@ type DriveAPI interface {
 }
 
 type HTTPDrive struct {
-	FolderID string
-	Token    func(ctx context.Context) (string, error)
-	Client   *http.Client
+	FolderID   string
+	Token      func(ctx context.Context) (string, error)
+	Client     *http.Client
 	UploadBase string
 	DriveBase  string
 }
@@ -323,6 +324,7 @@ func Reconcile(ctx context.Context, dir, openName string, api DriveAPI) error {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
+			slog.Info("distill.part_uploaded", "part", name)
 			continue
 		}
 
@@ -347,6 +349,7 @@ func Reconcile(ctx context.Context, dir, openName string, api DriveAPI) error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		slog.Info("distill.part_uploaded", "part", name)
 	}
 	return nil
 }
