@@ -1354,6 +1354,13 @@ func TestNormalizeChineseLLMThinking(t *testing.T) {
 			wantUnchanged: true,
 		},
 		{
+			name:          "minimax m3.1 flash disabled -> adaptive",
+			model:         "MiniMax-M3.1-Flash",
+			input:         `{"model":"MiniMax-M3.1-Flash","thinking":{"type":"disabled"},"messages":[]}`,
+			wantApplied:   true,
+			wantTypeValue: "adaptive",
+		},
+		{
 			name:          "minimax m3 with no thinking field is no-op",
 			model:         "MiniMax-M3",
 			input:         `{"model":"MiniMax-M3","messages":[]}`,
@@ -1436,6 +1443,7 @@ func TestDefaultEffortForThinkingEnabled(t *testing.T) {
 		{name: "moonshot-v1-8k", model: "moonshot-v1-8k", want: strPtr("high")},
 		{name: "minimax-m3 (lowercase)", model: "minimax-m3", want: strPtr("high")},
 		{name: "MiniMax-M3 (mixed case)", model: "MiniMax-M3", want: strPtr("high")},
+		{name: "MiniMax-M3.1-Flash defaults to max", model: "MiniMax-M3.1-Flash", want: strPtr("max")},
 		{name: "qwen3-thinking variant", model: "qwen3-235b-a22b-thinking-2507", want: strPtr("high")},
 
 		// DeepSeek 有原生 effort 支持→不注入默认，让客户端意图透传
@@ -1483,6 +1491,18 @@ func TestOpenAIBodyHasThinkingEnabled(t *testing.T) {
 			require.Equal(t, tt.want, OpenAIBodyHasThinkingEnabled([]byte(tt.body)))
 		})
 	}
+}
+
+func TestNormalizeMiniMaxM31FlashChat(t *testing.T) {
+	got, applied := NormalizeMiniMaxM31FlashChat([]byte(`{"model":"MiniMax-M3.1-Flash","thinking":{"type":"disabled"},"reasoning_effort":"none","service_tier":"priority"}`), "MiniMax-M3.1-Flash")
+	require.True(t, applied)
+	require.Equal(t, "adaptive", gjson.GetBytes(got, "thinking.type").String())
+	require.Equal(t, "max", gjson.GetBytes(got, "reasoning_effort").String())
+	require.False(t, gjson.GetBytes(got, "service_tier").Exists())
+
+	unchanged, applied := NormalizeMiniMaxM31FlashChat([]byte(`{"model":"MiniMax-M3","thinking":{"type":"disabled"}}`), "MiniMax-M3")
+	require.False(t, applied)
+	require.Equal(t, "disabled", gjson.GetBytes(unchanged, "thinking.type").String())
 }
 
 func TestApplyThinkingEnabledFallback(t *testing.T) {

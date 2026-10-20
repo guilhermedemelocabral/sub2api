@@ -1605,6 +1605,11 @@ func DefaultEffortForThinkingEnabled(mappedModel string) *string {
 	if strings.HasPrefix(strings.ToLower(mappedModel), "deepseek-") {
 		return nil
 	}
+	// MiniMax-M3.1-Flash 省略 effort 时上游默认是 max，不是 high。
+	if isMiniMaxM31FlashModel(mappedModel) {
+		effort := "max"
+		return &effort
+	}
 	effort := "high"
 	return &effort
 }
@@ -1852,7 +1857,12 @@ func NormalizeChineseLLMThinking(body []byte, mappedModel string) ([]byte, bool)
 		return body, false
 	}
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingType != "enabled" {
+	// M3.1-Flash 只接受 adaptive。disabled 在上游是 HTTP 400，因为这个模型始终思考。
+	if isMiniMaxM31FlashModel(modelLower) {
+		if thinkingType != "enabled" && thinkingType != "disabled" {
+			return body, false
+		}
+	} else if thinkingType != "enabled" {
 		return body, false
 	}
 	modified, err := sjson.SetBytes(body, "thinking.type", "adaptive")
@@ -1860,4 +1870,51 @@ func NormalizeChineseLLMThinking(body []byte, mappedModel string) ([]byte, bool)
 		return body, false
 	}
 	return modified, true
+}
+
+// isMiniMaxM31FlashModel reports the official MiniMax-M3.1-Flash id and hyphenated aliases.
+func isMiniMaxM31FlashModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "minimax-m3.1") || strings.Contains(model, "minimax-m3-1")
+}
+
+// NormalizeMiniMaxM31FlashChat rewrites Chat Completions fields that MiniMax-M3.1-Flash rejects.
+// Thinking stays adaptive, reasoning_effort "none" becomes the upstream default "max",
+// and service_tier is removed because this model does not accept that field.
+func NormalizeMiniMaxM31FlashChat(body []byte, mappedModel string) ([]byte, bool) {
+	if !isMiniMaxM31FlashModel(mappedModel) {
+		return body, false
+	}
+	modified := body
+	changed := false
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(modified, "thinking.type").String()))
+	if thinkingType == "enabled" || thinkingType == "disabled" {
+		next, err := sjson.SetBytes(modified, "thinking.type", "adaptive")
+		if err != nil {
+			return body, false
+		}
+		modified = next
+		changed = true
+	}
+	for _, path := range []string{"reasoning_effort", "reasoning.effort"} {
+		raw := strings.ToLower(strings.TrimSpace(gjson.GetBytes(modified, path).String()))
+		if raw != "none" {
+			continue
+		}
+		next, err := sjson.SetBytes(modified, path, "max")
+		if err != nil {
+			return body, false
+		}
+		modified = next
+		changed = true
+	}
+	if gjson.GetBytes(modified, "service_tier").Exists() {
+		next, err := sjson.DeleteBytes(modified, "service_tier")
+		if err != nil {
+			return body, false
+		}
+		modified = next
+		changed = true
+	}
+	return modified, changed
 }

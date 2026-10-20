@@ -897,6 +897,14 @@ func (s *BillingService) initFallbackPricing() {
 		CacheReadPricePerToken: 0.12e-6,
 		SupportsCacheBreakdown: false,
 	}
+	// MiniMax-M3.1-Flash：价目表单独一档，无 512K 分档，也不支持 service_tier=priority。
+	// https://platform.minimax.io/docs/guides/pricing-paygo
+	s.fallbackPrices["minimax-m3.1-flash"] = &ModelPricing{
+		InputPricePerToken:     0.15e-6,  // $0.15 per MTok
+		OutputPricePerToken:    0.60e-6,  // $0.60 per MTok
+		CacheReadPricePerToken: 0.015e-6, // $0.015 per MTok
+		SupportsCacheBreakdown: false,
+	}
 	s.fallbackPrices["minimax-m2.7"] = &ModelPricing{
 		InputPricePerToken:     0.30e-6, // $0.30 per MTok
 		OutputPricePerToken:    1.20e-6,
@@ -1212,7 +1220,10 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 		return s.fallbackPrices["kimi-k2"]
 	}
 
-	// MiniMax M 系列（M3 / M2.7 / M2.5 / M2.1 / M2；含 highspeed 变体）
+	// MiniMax M 系列。M3.1 必须先于 M3：`minimax-m3` 是 `minimax-m3.1-flash` 的子串。
+	if strings.Contains(modelLower, "minimax-m3.1") || strings.Contains(modelLower, "minimax-m3-1") {
+		return s.fallbackPrices["minimax-m3.1-flash"]
+	}
 	if strings.Contains(modelLower, "minimax-m3") {
 		return s.fallbackPrices["minimax-m3"]
 	}

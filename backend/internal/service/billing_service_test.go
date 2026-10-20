@@ -816,6 +816,13 @@ func TestGetFallbackPricing_FamilyMatching(t *testing.T) {
 			expectedCacheRead: floatPtr(0.12e-6),
 		},
 		{
+			name:              "minimax m3.1 flash is not billed as m3",
+			model:             "MiniMax-M3.1-Flash",
+			expectedInput:     0.15e-6,
+			expectedOutput:    floatPtr(0.60e-6),
+			expectedCacheRead: floatPtr(0.015e-6),
+		},
+		{
 			name:              "minimax m2.7",
 			model:             "minimax-m2.7",
 			expectedInput:     0.30e-6,

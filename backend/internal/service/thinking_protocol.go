@@ -70,7 +70,7 @@ func ResolveThinkingProtocol(modelID string) ThinkingProtocol {
 	}
 	// MiniMax M 系列：走 https://api.minimax.io/anthropic 端点，
 	// 官方明文要求 thinking block round-trip（interleaved thinking 协议）。
-	// 实例：MiniMax-M2、MiniMax-M2.1、MiniMax-M2.5、MiniMax-M2.7、MiniMax-M2.7-highspeed
+	// 实例：MiniMax-M2、MiniMax-M2.1、MiniMax-M2.5、MiniMax-M2.7、MiniMax-M2.7-highspeed、MiniMax-M3.1-Flash
 	// 大小写在 ToLower 后统一为 minimax-。
 	if strings.HasPrefix(id, "minimax-m") {
 		return ThinkingProtocolPassbackRequired

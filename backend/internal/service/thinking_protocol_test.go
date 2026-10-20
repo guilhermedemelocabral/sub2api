@@ -38,6 +38,7 @@ func TestResolveThinkingProtocol(t *testing.T) {
 		{"MiniMax-M2.5", "MiniMax-M2.5", ThinkingProtocolPassbackRequired},
 		{"MiniMax-M2.7", "MiniMax-M2.7", ThinkingProtocolPassbackRequired},
 		{"MiniMax-M2.7-highspeed", "MiniMax-M2.7-highspeed", ThinkingProtocolPassbackRequired},
+		{"MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", ThinkingProtocolPassbackRequired},
 		{"minimax-m2 lowercase", "minimax-m2", ThinkingProtocolPassbackRequired},
 
 		// 未知 / 保守
