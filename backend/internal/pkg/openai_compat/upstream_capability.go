@@ -47,12 +47,22 @@ const (
 
 	// ResponsesSupportModeForceChatCompletions 强制使用 /v1/chat/completions。
 	ResponsesSupportModeForceChatCompletions ResponsesSupportMode = "force_chat_completions"
+
+	// ResponsesSupportModeInboundNative 按入站协议原生直通：Responses 入站仅在上游支持
+	// /v1/responses 时走 Responses；Chat Completions 与 Messages 入站恒走 Chat Completions，
+	// 不转换为 Responses。
+	ResponsesSupportModeInboundNative ResponsesSupportMode = "inbound_native"
 )
 
 // ExtraKeyResponsesMode 是 accounts.extra JSON 中存储手动覆盖模式的键名。
 // 值类型为 string：auto=跟随探测，force_responses=强制 Responses，
-// force_chat_completions=强制 Chat Completions。
+// force_chat_completions=强制 Chat Completions，inbound_native=按入站协议原生直通。
 const ExtraKeyResponsesMode = "openai_responses_mode"
+
+// ExtraKeyInboundNativeProtocols 是 inbound_native 模式下逐模型的原生协议限制键名。
+// 值为对象：上游模型名（大小写不敏感）→ 该模型原生支持的协议列表（chat_completions /
+// responses / anthropic）。未列出的模型沿用账号级规则。
+const ExtraKeyInboundNativeProtocols = "inbound_native_protocols"
 
 // ExtraKeyResponsesSupported 是 accounts.extra JSON 中存储自动探测结果的键名。
 // 值类型为 bool：true=支持、false=不支持、键缺失=未探测。
@@ -66,9 +76,17 @@ func NormalizeResponsesSupportMode(mode string) ResponsesSupportMode {
 		return ResponsesSupportModeForceResponses
 	case ResponsesSupportModeForceChatCompletions:
 		return ResponsesSupportModeForceChatCompletions
+	case ResponsesSupportModeInboundNative:
+		return ResponsesSupportModeInboundNative
 	default:
 		return ResponsesSupportModeAuto
 	}
+}
+
+// InboundNativeRoutingEnabled 报告账号 extra 是否启用 inbound_native 按入站协议直通。
+func InboundNativeRoutingEnabled(extra map[string]any) bool {
+	mode, _ := extra[ExtraKeyResponsesMode].(string)
+	return NormalizeResponsesSupportMode(mode) == ResponsesSupportModeInboundNative
 }
 
 // ResolveResponsesSupport 从账号的 extra map 中读取手动覆盖模式与探测标记。
